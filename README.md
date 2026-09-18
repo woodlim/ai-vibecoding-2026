@@ -47,7 +47,6 @@ AI에게 코딩을 시키자, 제대로!
 
 ![](assets/20260917_171411_image.png)
 
-
 - 최종 화면
 - 채팅 창 명령 / 여러 LLM에 전달할 명령어 리스트
 
@@ -65,3 +64,16 @@ AI에게 코딩을 시키자, 제대로!
 #### CLI Codex
 
 - 파워쉘, 콘솔 창에서 명령어로 수행하는 Codex
+
+
+
+### 자동매매 개발환경
+
+#### 토스증권 OpenAPI
+
+- https://corp.tossinvest.com/lo/open-api
+- 토스앱 모바일 설치 가입
+- 토스증권 사용 설정
+- 토스증권 PC 웹사이트 동작
+- 사용중인 아이피를 토스증권 PC 등록
+- OpenAPI 키 발급 후 ClientID , Client Secret 문자열 보관
