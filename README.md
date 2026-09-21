@@ -88,5 +88,3 @@ AI에게 코딩을 시키자, 제대로!
 ### API 신청하기
 
 
-app key : 3HREO9J15F9K391WT9G49DGFDGI4AP4C
-app secret : qkGYEb+MhxqLG3H562+FvlahponeHtE9lzqbin5Si5Q=
