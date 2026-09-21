@@ -65,9 +65,15 @@ AI에게 코딩을 시키자, 제대로!
 
 - 파워쉘, 콘솔 창에서 명령어로 수행하는 Codex
 
+### 바이브 코딩
+
+- 제로샷 프롬프트 : 아무런 기초지식없이 대화로 바이브코딩
+- 원샷 프롬프트 : 적어도 한줄의 요구사항을 작성해서 바이브코딩
+- 퓨샷 프롬프트 : PRD를 작성해서 바이브코딩
 
 
-### 자동매매 개발환경
+
+### 주식 자동매매 개발환경
 
 #### 토스증권 OpenAPI
 
@@ -77,3 +83,10 @@ AI에게 코딩을 시키자, 제대로!
 - 토스증권 PC 웹사이트 동작
 - 사용중인 아이피를 토스증권 PC 등록
 - OpenAPI 키 발급 후 ClientID , Client Secret 문자열 보관
+- https://developers.tossinvest.com/docs
+
+### API 신청하기
+
+
+app key : 3HREO9J15F9K391WT9G49DGFDGI4AP4C
+app secret : qkGYEb+MhxqLG3H562+FvlahponeHtE9lzqbin5Si5Q=
