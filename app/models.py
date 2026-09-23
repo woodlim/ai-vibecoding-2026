@@ -17,8 +17,19 @@ def now_utc() -> datetime:
 
 class Quote(BaseModel):
     symbol: str = Field(min_length=1, max_length=20)
+    name: str | None = None
     price: Decimal = Field(gt=0)
     timestamp: datetime = Field(default_factory=now_utc)
+
+
+class Candle(BaseModel):
+    symbol: str
+    timestamp: datetime
+    close_price: Decimal
+    open_price: Decimal | None = None
+    high_price: Decimal | None = None
+    low_price: Decimal | None = None
+    volume: Decimal | None = None
 
 
 class OrderRequest(BaseModel):
@@ -58,4 +69,3 @@ class StrategyStatus(BaseModel):
     running: bool
     symbol: str
     last_signal: str | None = None
-
