@@ -30,6 +30,16 @@ class PaperTrader:
     def account(self) -> Account:
         return Account(cash=self.cash, initial_cash=self.initial_cash, positions=list(self.positions.values()))
 
+    def start_strategy(self, symbol: str) -> StrategyStatus:
+        self._prices[symbol].clear()
+        self.strategy = StrategyStatus(running=True, symbol=symbol)
+        return self.strategy
+
+    def stop_strategy(self) -> StrategyStatus:
+        self.strategy.running = False
+        self.strategy.last_error = None
+        return self.strategy
+
     def order(self, request: OrderRequest) -> Order:
         key = request.client_order_id or str(uuid4())
         if key in self.client_orders:
@@ -72,14 +82,14 @@ class PaperTrader:
         return result
 
     def run_strategy(self, symbol: str) -> StrategyStatus:
-        self.strategy = StrategyStatus(running=True, symbol=symbol, last_signal=self.strategy.last_signal)
         prices = self._prices.get(symbol, [])
+        self.strategy.price_samples = len(prices)
         if len(prices) < 5:
             return self.strategy
         fast = sum(prices[-3:]) / Decimal(3)
         slow = sum(prices[-5:]) / Decimal(5)
         position = self.positions.get(symbol)
-        if fast > slow and not position:
+        if fast > slow and (not position or position.quantity <= 0):
             self.order(OrderRequest(symbol=symbol, side="BUY", quantity=Decimal(1), client_order_id=f"sma-buy-{len(self.orders)+1}"))
             self.strategy.last_signal = "BUY"
         elif fast < slow and position and position.quantity > 0:

@@ -69,3 +69,7 @@ class StrategyStatus(BaseModel):
     running: bool
     symbol: str
     last_signal: str | None = None
+    price_samples: int = 0
+    poll_interval_seconds: int = 60
+    last_checked_at: datetime | None = None
+    last_error: str | None = None

@@ -27,8 +27,61 @@ async function loadMarketStatus() { try { const items = await api('/api/v1/marke
 loadMarketStatus();
 async function loadRecommendations() { try { const account = await api('/api/v1/account'); const budget = Number(account.initial_cash) * 0.4; const quotes = await api(`/api/v1/quotes-batch/live?symbols=${recommendedStocks.map(stock => stock.symbol).join(',')}`); const quoteMap = Object.fromEntries(quotes.map(quote => [quote.symbol, quote])); $('recommendations').innerHTML = recommendedStocks.map((stock, index) => { const quote = quoteMap[stock.symbol]; const price = quote ? Number(quote.price) : 0; const quantity = price ? Math.max(1, Math.floor(budget / 5 / price)) : 0; return `<div class="recommend-card"><div class="recommend-rank">#${index + 1} · 참고</div><strong>${stock.name}</strong><small>${stock.symbol}</small><b>${price ? money(price) : '시세 없음'}</b><p>추천금액 기준 약 ${quantity}주</p></div>`; }).join(''); } catch (error) { $('recommendations').textContent = error.message; } }
 // 추천 목록은 일봉 상승률·거래량 기반 동적 API를 사용합니다.
-async function loadDynamicRecommendations() { try { const account = await api('/api/v1/account'); const budget = Number(account.initial_cash) * 0.4; const items = await api('/api/v1/recommendations'); const quotes = await api(`/api/v1/quotes-batch/live?symbols=${items.map(item => item.symbol).join(',')}`); const prices = Object.fromEntries(quotes.map(q => [q.symbol, Number(q.price)])); $('recommendations').innerHTML = items.map((item, index) => { const price = prices[item.symbol] || 0; const quantity = price ? Math.floor(budget / price) : 0; return `<div class="recommend-card"><div class="recommend-rank">#${index + 1} · ${item.score}점</div><strong>${item.name}</strong><small>${item.symbol}</small><b>${price ? money(price) : '시세 없음'}</b><p>등락률 ${item.change_rate}% · 거래량 ${item.volume}배<br>최대 ${quantity}주 매수 가능</p><button class="recommend-buy" data-symbol="${item.symbol}" data-quantity="${quantity}">PAPER 매수</button></div>`; }).join(''); } catch (error) { $('recommendations').textContent = error.message; } }
-loadDynamicRecommendations();
+async function loadDynamicRecommendations() {
+  const retryButton = $('findRecommendations');
+  retryButton.disabled = true;
+  retryButton.textContent = '불러오는 중...';
+  $('recommendations').textContent = '거래 데이터를 분석하고 있습니다...';
+  try {
+    const account = await api('/api/v1/account');
+    const budget = Number(account.initial_cash) * 0.4;
+    const items = await api('/api/v1/recommendations');
+    if (!items.length) throw new Error('분석할 수 있는 종목 데이터가 없습니다.');
+    let prices = {};
+    try {
+      const quotes = await api(`/api/v1/quotes-batch/live?symbols=${items.map(item => item.symbol).join(',')}`);
+      prices = Object.fromEntries(quotes.map(q => [q.symbol, Number(q.price)]));
+    } catch {
+      // 추천 점수 데이터가 있으면 현재가 조회에 실패해도 종목 목록은 표시합니다.
+    }
+    $('recommendations').innerHTML = items.map((item, index) => {
+      const price = prices[item.symbol] || 0;
+      const quantity = price ? Math.floor(budget / price) : 0;
+      return `<div class="recommend-card"><div class="recommend-rank">#${index + 1} · ${item.score}점</div><strong>${item.name}</strong><small>${item.symbol}</small><b>${price ? money(price) : '시세 대기 중'}</b><p>등락률 ${item.change_rate}% · 거래량 ${item.volume}배<br>${price ? `최대 ${quantity}주 매수 가능` : '현재가 연결 후 수량 계산'}</p><button class="recommend-buy" data-symbol="${item.symbol}" data-quantity="${quantity}" ${price ? '' : 'disabled'}>PAPER 매수</button></div>`;
+    }).join('');
+    document.querySelectorAll('#recommendations .recommend-card').forEach(card => {
+      const symbol = card.querySelector('small')?.textContent.trim();
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'recommend-auto-start';
+      button.dataset.symbol = symbol;
+      button.textContent = '자동매매 시작';
+      card.append(button);
+    });
+  } catch (error) {
+    $('recommendations').textContent = `추천 종목을 불러오지 못했습니다. ${error.message}`;
+  } finally {
+    retryButton.disabled = false;
+    retryButton.textContent = '후보 찾기';
+  }
+}
+document.addEventListener('click', async (event) => {
+  const button = event.target.closest('.recommend-auto-start');
+  if (!button || button.disabled) return;
+  event.stopImmediatePropagation();
+  const symbol = button.dataset.symbol;
+  button.disabled = true;
+  button.textContent = '시작 요청 중...';
+  try {
+    await api(`/api/v1/strategies/sma/start?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' });
+    message('strategyMessage', `${symbol} 자동매매를 시작했습니다. 전략 상태를 확인 중입니다.`);
+    await refresh();
+  } catch (error) {
+    message('strategyMessage', error.message, true);
+    button.disabled = false;
+    button.textContent = '다시 시도';
+  }
+});
 async function refreshRecommendationQuantities() { try { const account = await api('/api/v1/account'); const budget = Number(account.initial_cash) * 0.4; const quotes = await api(`/api/v1/quotes-batch/live?symbols=${recommendedStocks.map(stock => stock.symbol).join(',')}`); const quoteMap = Object.fromEntries(quotes.map(q => [q.symbol, q])); document.querySelectorAll('.recommend-card').forEach((card, index) => { const stock = recommendedStocks[index]; const price = Number(quoteMap[stock.symbol]?.price || 0); const quantity = price ? Math.floor(budget / price) : 0; const text = card.querySelector('p'); if (text) text.innerHTML = `추천 사용금액 ${money(budget)}<br>최대 ${quantity}주 매수 가능`; const button = card.querySelector('.recommend-buy'); if (button) button.dataset.quantity = String(quantity); }); } catch {} }
 // 동적 추천 API가 점수와 수량을 함께 렌더링하므로 별도 덮어쓰기를 하지 않습니다.
 setTimeout(() => { document.querySelectorAll('.recommend-card').forEach(card => { const button = card.querySelector('.recommend-buy'); const text = card.querySelector('p'); if (button && text) text.textContent = `최대 ${button.dataset.quantity || 0}주 매수 가능`; }); }, 2500);
@@ -41,11 +94,14 @@ const message = (id, text, error = false) => { $(id).textContent = text; $(id).c
 const priceHistory = {};
 const candleHistory = {};
 const latestQuotes = {};
+let strategyHelp;
 const historyTable = document.createElement('div');
 historyTable.className = 'history-table';
 document.querySelector('#quoteResult').after(historyTable);
 document.querySelector('footer').insertAdjacentHTML('beforebegin', '<section class="grid extra-panels"><article><h2>계좌 요약</h2><div id="accountSummary">계좌 정보를 불러오는 중...</div></article><article class="recommendation-panel"><h2>추천 종목 TOP 5 <button id="findRecommendations" class="secondary">후보찾기</button></h2><p class="subtle">가상매매 후보입니다. 실제 주문은 발생하지 않습니다.</p><div id="recommendations" class="recommendations">목록을 불러오는 중...</div></article></section>');
 const recommendationChart = document.createElement('div'); recommendationChart.id = 'recommendationChart'; recommendationChart.className = 'recommendation-chart'; document.querySelector('#recommendations').after(recommendationChart);
+$('findRecommendations').addEventListener('click', loadDynamicRecommendations);
+loadDynamicRecommendations();
 const extraStyle = document.createElement('style'); extraStyle.textContent = '.extra-panels{margin-top:16px}.subtle{color:#91a0bd;font-size:12px}.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}.metrics span{display:block;color:#91a0bd;font-size:12px;margin-bottom:6px}.metrics strong{font-size:18px}.positive{color:#36d29a}.negative{color:#ff6b78}small{color:#91a0bd}@media(max-width:520px){.metrics{grid-template-columns:1fr 1fr}}'; document.head.appendChild(extraStyle);
 const recommendationStyle = document.createElement('style'); recommendationStyle.textContent = '.recommendations{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.recommend-card{min-width:0;padding:14px;border:1px solid #30405f;border-radius:12px;background:#18243e;cursor:pointer;transition:.2s}.recommend-card:hover{border-color:#6d91ff;transform:translateY(-2px)}.recommend-rank{color:#36d29a;font-size:11px;font-weight:800}.recommend-card strong{display:block;font-size:15px;margin:9px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.recommend-card small{color:#91a0bd}.recommend-card b{display:block;font-size:18px;margin:14px 0;color:#fff}.recommend-card p{min-height:34px;margin:0 0 10px;color:#91a0bd;font-size:11px}.recommend-buy{width:100%;height:36px;padding:0;font-size:11px}.recommend-card .secondary{float:none;width:100%}.recommendation-chart{margin-top:18px;min-height:20px}.recommendation-chart h3{font-size:14px;margin:0 0 10px}.recommendation-chart canvas{width:100%;height:230px;background:#101a31;border-radius:10px}body.light .recommend-card{background:#fff4f9;border-color:#f1d5e4}body.light .recommend-card b{color:#30233a}body.light .recommendation-chart canvas{background:#fff0f6}@media(max-width:900px){.recommendations{grid-template-columns:repeat(3,1fr)}}@media(max-width:600px){.recommendations{grid-template-columns:repeat(2,1fr)}}'; document.head.appendChild(recommendationStyle);
 
@@ -66,7 +122,20 @@ function render(account, orders, strategy) {
   $('cash').textContent = money(account.cash);
   $('positionCount').textContent = account.positions.length;
   $('orderCount').textContent = orders.length;
+  document.querySelectorAll('.recommend-auto-start').forEach(button => {
+    const active = strategy.running && strategy.symbol === button.dataset.symbol;
+    button.textContent = active ? '자동매매 실행 중' : strategy.running ? '이 종목으로 변경' : '자동매매 시작';
+    button.disabled = active;
+  });
+  $('strategyState').textContent = strategy.running ? `${strategy.symbol} 실행 중` : '중지';
+  if (strategyHelp) strategyHelp.textContent = `PAPER 자동매매: ${strategy.poll_interval_seconds || 60}초마다 현재가를 확인합니다. 최근 3회 평균이 5회 평균보다 높으면 1주 매수하고, 낮으면 보유량을 매도합니다.`;
+  if (strategy.last_error) message('strategyMessage', strategy.last_error, true);
+  else if (strategy.running) message('strategyMessage', `${strategy.symbol} PAPER 자동매매 · 시세 샘플 ${strategy.price_samples}/5`);
   $('strategyState').textContent = strategy.running ? '실행 중' : '중지';
+  $('strategyState').textContent = strategy.running ? `${strategy.symbol} 실행 중` : '중지';
+  if (strategy.last_error) message('strategyMessage', strategy.last_error, true);
+  else if (strategy.running) message('strategyMessage', `${strategy.symbol} PAPER 자동매매 · 시세 샘플 ${strategy.price_samples}/5`);
+  if (strategyHelp) strategyHelp.textContent = `추천 종목 카드에서 선택하세요. PAPER 자동매매는 ${strategy.poll_interval_seconds || 60}초마다 시세를 확인해 3회 평균과 5회 평균을 비교합니다.`;
   $('positions').innerHTML = account.positions.length
     ? `<table><tr><th>종목</th><th>수량</th><th>현재가</th><th>평가손익</th></tr>${account.positions.map(p => { const current = latestQuotes[p.symbol] || Number(p.average_price); const pnl = (current - Number(p.average_price)) * Number(p.quantity); return `<tr><td>${p.symbol}</td><td>${p.quantity}</td><td>${money(current)}</td><td class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</td></tr>`; }).join('')}</table>`
     : '없음';
@@ -83,6 +152,12 @@ function render(account, orders, strategy) {
 
 async function refresh() {
   const [account, orders, strategy] = await Promise.all([api('/api/v1/account'), api('/api/v1/orders'), api('/api/v1/strategies/status')]);
+  await Promise.all(account.positions.map(async (position) => {
+    try {
+      const quote = await api(`/api/v1/quotes/${encodeURIComponent(position.symbol)}`);
+      latestQuotes[position.symbol] = Number(quote.price);
+    } catch {}
+  }));
   render(account, orders, strategy);
 }
 
@@ -118,9 +193,58 @@ $('quoteLookupForm').addEventListener('submit', async (event) => {
   if (liveTimer) clearInterval(liveTimer);
   liveTimer = setInterval(loadLiveQuote, 5000);
 });
+$('lookupSymbol').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('quoteLookupForm').requestSubmit(); } });
 
 $('orderForm').addEventListener('submit', async (event) => { event.preventDefault(); try { const order = await api('/api/v1/orders', { method: 'POST', body: JSON.stringify({ symbol: $('orderSymbol').value, side: $('side').value, quantity: $('quantity').value }) }); message('orderMessage', `${order.side === 'BUY' ? '매수' : '매도'} 체결 완료`); await refresh(); } catch (error) { message('orderMessage', error.message, true); } });
 $('strategyButton').onclick = async () => { try { const symbol = $('lookupSymbol').value.split(',')[0].trim(); const result = await api(`/api/v1/strategies/sma/start?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' }); message('strategyMessage', result.last_signal ? `${result.last_signal} 신호 발생` : '시세 데이터 5개가 필요합니다.'); await refresh(); } catch (error) { message('strategyMessage', error.message, true); } };
 $('killButton').onclick = async () => { await api('/api/v1/system/kill-switch', { method: 'POST' }); message('strategyMessage', '전략을 중지했습니다.'); await refresh(); };
 $('refreshButton').onclick = refresh;
 refresh().catch(error => message('strategyMessage', error.message, true));
+const strategySymbolInput = document.createElement('input');
+strategySymbolInput.id = 'strategySymbol';
+strategySymbolInput.value = '005930';
+strategySymbolInput.maxLength = 20;
+strategySymbolInput.placeholder = '종목코드';
+strategySymbolInput.setAttribute('aria-label', '자동매매 종목코드');
+const strategyInputLabel = document.createElement('label');
+strategyInputLabel.className = 'strategy-symbol-label';
+strategyInputLabel.textContent = '종목코드';
+strategyInputLabel.append(strategySymbolInput);
+const strategyControls = document.createElement('div');
+strategyControls.className = 'strategy-controls';
+strategyControls.append(strategyInputLabel);
+document.querySelector('#strategyButton').before(strategyControls);
+document.querySelector('#strategyButton').textContent = '자동매매 시작';
+document.querySelector('#killButton').textContent = '중지 / Kill switch';
+strategyHelp = document.createElement('p');
+strategyHelp.className = 'subtle';
+strategyHelp.textContent = 'PAPER 자동매매: 60초마다 현재가를 확인합니다. 최근 3회 평균이 5회 평균보다 높으면 1주 매수하고, 낮으면 보유량을 매도합니다.';
+document.querySelector('#strategyMessage').before(strategyHelp);
+const strategyStyle = document.createElement('style');
+strategyStyle.textContent = '.strategy-controls{display:flex;align-items:center;margin:8px 0}.strategy-symbol-label{display:flex;align-items:center;gap:8px;color:#91a0bd;font-size:12px}.strategy-controls input{width:150px}.strategy-help{font-size:12px;line-height:1.6}button:disabled{opacity:.5;cursor:not-allowed;transform:none}';
+document.head.appendChild(strategyStyle);
+document.querySelector('#strategyButton').onclick = async () => {
+  try {
+    const symbol = strategySymbolInput.value.trim();
+    if (!symbol) throw new Error('자동매매 종목코드를 입력하세요.');
+    await api(`/api/v1/strategies/sma/start?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' });
+    message('strategyMessage', `${symbol} PAPER 자동매매를 시작했습니다.`);
+    await refresh();
+  } catch (error) { message('strategyMessage', error.message, true); }
+};
+strategyControls.remove();
+document.querySelector('#strategyButton').remove();
+strategyHelp.textContent = '추천 종목 카드에서 자동매매할 종목을 선택하세요. PAPER 모드에서만 주문합니다.';
+document.querySelector('#killButton').onclick = async () => {
+  try {
+    await api('/api/v1/system/kill-switch', { method: 'POST' });
+    message('strategyMessage', '자동매매를 중지했습니다.');
+    await refresh();
+  } catch (error) { message('strategyMessage', error.message, true); }
+};
+setInterval(async () => {
+  try { const status = await api('/api/v1/strategies/status'); if (status.running) await refresh(); } catch {}
+}, 5000);
+const autoRecommendationStyle = document.createElement('style');
+autoRecommendationStyle.textContent = '.recommend-auto-start{width:100%;height:34px;margin-top:7px;padding:0 8px;background:#263758;color:#c6d7ff;border:1px solid #40547b;box-shadow:none;font-size:11px}.recommend-auto-start:hover{background:#31466f}.recommend-auto-start:disabled{opacity:.65;cursor:default}body.light .recommend-auto-start{background:#fff0f6;color:#8b4265;border-color:#e8b8cf}';
+document.head.appendChild(autoRecommendationStyle);

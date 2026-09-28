@@ -291,3 +291,5 @@ footer {
         min-width: 0
     }
 }
+/* 수동 시세 조회는 자동매매 대시보드에서 사용하지 않음 */
+.quote-panel { display: none !important; }

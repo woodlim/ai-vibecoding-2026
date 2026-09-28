@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 import asyncio
+import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from .models import Account, Candle, Order, OrderRequest, Quote, StrategyStatus
+from .models import Account, Candle, Order, OrderRequest, Quote, StrategyStatus, now_utc
 from .paper import PaperTrader
 from .toss_client import TossApiError, TossClient
 
@@ -17,6 +18,44 @@ app.mount("/assets", StaticFiles(directory=Path(__file__).resolve().parent.paren
 trader = PaperTrader()
 toss = TossClient()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+try:
+    AUTO_TRADE_INTERVAL_SECONDS = max(15, int(os.getenv("AUTO_TRADE_INTERVAL_SECONDS", "60")))
+except ValueError:
+    AUTO_TRADE_INTERVAL_SECONDS = 60
+strategy_task: asyncio.Task | None = None
+
+
+async def _auto_trade_loop(symbol: str) -> None:
+    while trader.strategy.running and trader.strategy.symbol == symbol:
+        try:
+            quote = await toss.quote(symbol)
+            trader.set_quote(quote)
+            trader.run_strategy(symbol)
+            trader.strategy.last_error = None
+        except (TossApiError, ValueError) as exc:
+            trader.strategy.last_error = str(exc)
+        except Exception as exc:
+            trader.strategy.last_error = f"전략 실행 오류: {exc}"
+        trader.strategy.last_checked_at = now_utc()
+        await asyncio.sleep(AUTO_TRADE_INTERVAL_SECONDS)
+
+
+async def _stop_auto_trade_loop() -> None:
+    global strategy_task
+    trader.stop_strategy()
+    task = strategy_task
+    strategy_task = None
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@app.on_event("shutdown")
+async def stop_auto_trade_on_shutdown() -> None:
+    await _stop_auto_trade_loop()
 
 @app.get("/", include_in_schema=False)
 def frontend() -> FileResponse:
@@ -71,21 +110,32 @@ async def search_stocks(q: str) -> list[dict]:
 @app.get("/api/v1/recommendations")
 async def recommendations() -> list[dict]:
     candidates = [{"name": "삼성전자", "symbol": "005930"}, {"name": "SK하이닉스", "symbol": "000660"}, {"name": "NAVER", "symbol": "035420"}, {"name": "현대차", "symbol": "005380"}, {"name": "카카오", "symbol": "035720"}, {"name": "LG전자", "symbol": "066570"}, {"name": "LG화학", "symbol": "051910"}, {"name": "삼성SDI", "symbol": "006400"}, {"name": "삼성전기", "symbol": "009150"}, {"name": "두산에너빌리티", "symbol": "034020"}]
-    async def score(candidate: dict) -> dict:
+    failures: list[str] = []
+
+    async def score(candidate: dict) -> dict | None:
         try:
             candles = await toss.candles(candidate["symbol"], 10)
-            if len(candles) < 2:
-                return {**candidate, "score": 0, "change_rate": 0, "volume": 0}
-            previous, latest = candles[-2], candles[-1]
-            change_rate = float((latest.close_price - previous.close_price) / previous.close_price * 100)
-            volume = float(latest.volume or 0)
-            avg_volume = sum(float(c.volume or 0) for c in candles[:-1]) / max(1, len(candles) - 1)
-            volume_ratio = volume / avg_volume if avg_volume else 1
-            score_value = max(0, min(100, 50 + change_rate * 8 + min(volume_ratio, 3) * 8))
-            return {**candidate, "score": round(score_value), "change_rate": round(change_rate, 2), "volume": round(volume_ratio, 2)}
-        except TossApiError:
-            return {**candidate, "score": 0, "change_rate": 0, "volume": 0}
-    result = await asyncio.gather(*(score(candidate) for candidate in candidates))
+        except TossApiError as exc:
+            failures.append(str(exc))
+            return None
+        if len(candles) < 2:
+            failures.append(f"{candidate['symbol']} 종목의 일봉 데이터가 부족합니다.")
+            return None
+        previous, latest = candles[-2], candles[-1]
+        if previous.close_price <= 0:
+            failures.append(f"{candidate['symbol']} 종목의 종가 데이터가 올바르지 않습니다.")
+            return None
+        change_rate = float((latest.close_price - previous.close_price) / previous.close_price * 100)
+        volume = float(latest.volume or 0)
+        avg_volume = sum(float(c.volume or 0) for c in candles[:-1]) / max(1, len(candles) - 1)
+        volume_ratio = volume / avg_volume if avg_volume else 1
+        score_value = max(0, min(100, 50 + change_rate * 8 + min(volume_ratio, 3) * 8))
+        return {**candidate, "score": round(score_value), "change_rate": round(change_rate, 2), "volume": round(volume_ratio, 2)}
+
+    result = [item for item in await asyncio.gather(*(score(candidate) for candidate in candidates)) if item]
+    if not result:
+        detail = failures[0] if failures else "추천 계산에 필요한 일봉 데이터가 없습니다."
+        raise HTTPException(503, f"추천 종목 데이터를 가져오지 못했습니다. {detail}")
     return sorted(result, key=lambda item: item["score"], reverse=True)[:5]
 
 
@@ -156,11 +206,28 @@ def strategy_status() -> StrategyStatus:
 
 
 @app.post("/api/v1/strategies/sma/start", response_model=StrategyStatus)
-def start_strategy(symbol: str = "005930") -> StrategyStatus:
-    return trader.run_strategy(symbol)
+async def start_strategy(symbol: str = "005930") -> StrategyStatus:
+    global strategy_task
+    symbol = symbol.strip()
+    if not symbol:
+        raise HTTPException(400, "자동매매할 종목코드를 입력하세요.")
+    if trader.strategy.running and trader.strategy.symbol == symbol and strategy_task and not strategy_task.done():
+        return trader.strategy
+    if strategy_task and not strategy_task.done():
+        await _stop_auto_trade_loop()
+    trader.start_strategy(symbol)
+    trader.strategy.poll_interval_seconds = AUTO_TRADE_INTERVAL_SECONDS
+    strategy_task = asyncio.create_task(_auto_trade_loop(symbol))
+    return trader.strategy
+
+
+@app.post("/api/v1/strategies/sma/stop", response_model=StrategyStatus)
+async def stop_strategy() -> StrategyStatus:
+    await _stop_auto_trade_loop()
+    return trader.strategy
 
 
 @app.post("/api/v1/system/kill-switch")
-def kill_switch() -> dict[str, str]:
-    trader.strategy.running = False
+async def kill_switch() -> dict[str, str]:
+    await _stop_auto_trade_loop()
     return {"status": "stopped", "mode": "PAPER"}
