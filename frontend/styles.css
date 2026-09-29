@@ -293,3 +293,14 @@ footer {
 }
 /* 수동 시세 조회는 자동매매 대시보드에서 사용하지 않음 */
 .quote-panel { display: none !important; }
+
+.trade-history-table { overflow-x: auto; }
+.trade-history-table table { width: 100%; min-width: 760px; }
+.trade-history-table th, .trade-history-table td { white-space: nowrap; }
+.trade-history-table .numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.trade-stock-name { display: block; margin-bottom: 4px; }
+.trade-side { display: inline-block; padding: 4px 9px; border-radius: 6px; font-weight: 700; }
+.trade-buy { color: #ff8a99; background: #ff647c18; }
+.trade-sell { color: #85b7ff; background: #4f9cff18; }
+body.light .trade-buy { color: #b52a43; background: #ffe0e7; }
+body.light .trade-sell { color: #205cb3; background: #e5eeff; }

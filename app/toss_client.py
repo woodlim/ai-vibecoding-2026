@@ -108,6 +108,25 @@ class TossClient:
         items = response.json().get("result", {}).get("candles", [])
         return [Candle(symbol=symbol, timestamp=datetime.fromisoformat(item["timestamp"]), close_price=Decimal(str(item["closePrice"])), open_price=Decimal(str(item["openPrice"])), high_price=Decimal(str(item["highPrice"])), low_price=Decimal(str(item["lowPrice"])), volume=Decimal(str(item.get("volume", 0)))) for item in reversed(items)]
 
+    async def rankings(self, ranking_type: str, duration: str = "realtime", count: int = 100) -> list[dict]:
+        """Return a market-wide Korean ranking from Toss OpenAPI."""
+        token = await self._access_token()
+        response = await self._request(
+            "GET",
+            "/api/v1/rankings",
+            params={
+                "type": ranking_type,
+                "marketCountry": "KR",
+                "duration": duration,
+                "excludeInvestmentCaution": "true",
+                "count": min(max(count, 1), 100),
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if response.status_code >= 400:
+            raise TossApiError(f"주식 랭킹 조회 실패: HTTP {response.status_code}")
+        return response.json().get("result", {}).get("rankings", [])
+
     async def market_prices(self, symbols: str = "KOSPI,KOSDAQ") -> list[dict]:
         token = await self._access_token()
         response = await self._request("GET", "/api/v1/market-indicators/prices", params={"symbols": symbols}, headers={"Authorization": f"Bearer {token}"})

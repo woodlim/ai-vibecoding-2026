@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 Side = Literal["BUY", "SELL"]
@@ -50,6 +50,13 @@ class Order(BaseModel):
     price: Decimal
     status: OrderStatus
     created_at: datetime
+    symbol_name: str | None = None
+    source: Literal["AUTO", "MANUAL"] = "MANUAL"
+
+    @computed_field
+    @property
+    def total_amount(self) -> Decimal:
+        return self.price * self.filled_quantity
 
 
 class Position(BaseModel):
@@ -63,11 +70,16 @@ class Account(BaseModel):
     cash: Decimal
     initial_cash: Decimal
     positions: list[Position]
+    daily_budget_date: date
+    daily_auto_buy_limit: Decimal
+    daily_auto_buy_used: Decimal
+    daily_auto_buy_remaining: Decimal
 
 
 class StrategyStatus(BaseModel):
     running: bool
     symbol: str
+    symbol_name: str | None = None
     last_signal: str | None = None
     price_samples: int = 0
     poll_interval_seconds: int = 60

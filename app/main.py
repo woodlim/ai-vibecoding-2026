@@ -23,14 +23,67 @@ try:
 except ValueError:
     AUTO_TRADE_INTERVAL_SECONDS = 60
 strategy_task: asyncio.Task | None = None
+strategy_command_id = 0
 
 
-async def _auto_trade_loop(symbol: str) -> None:
-    while trader.strategy.running and trader.strategy.symbol == symbol:
+try:
+    AUTO_MIN_DAILY_CHANGE_PERCENT = max(0.0, float(os.getenv("AUTO_MIN_DAILY_CHANGE_PERCENT", "1.0")))
+except ValueError:
+    AUTO_MIN_DAILY_CHANGE_PERCENT = 1.0
+
+
+async def _market_momentum_candidates() -> list[dict]:
+    """Intersect market-wide volume leaders with positive daily gainers."""
+    volume_rows, gainer_rows = await asyncio.gather(
+        toss.rankings("MARKET_TRADING_VOLUME", "realtime", 100),
+        toss.rankings("TOP_GAINERS", "1d", 100),
+    )
+    volume_by_symbol = {row.get("symbol"): row for row in volume_rows if row.get("symbol")}
+    gainers_by_symbol = {row.get("symbol"): row for row in gainer_rows if row.get("symbol")}
+    overlap = set(volume_by_symbol) & set(gainers_by_symbol)
+    if not overlap:
+        return []
+
+    names: dict[str, str] = {}
+    symbols = sorted(overlap)
+    for offset in range(0, len(symbols), 200):
+        names.update(await toss.stock_names(symbols[offset:offset + 200]))
+
+    candidates: list[dict] = []
+    for symbol in overlap:
+        volume_row = volume_by_symbol[symbol]
+        gainer_row = gainers_by_symbol[symbol]
         try:
-            quote = await toss.quote(symbol)
-            trader.set_quote(quote)
-            trader.run_strategy(symbol)
+            change_percent = float(gainer_row["price"]["changeRate"]) * 100
+            price = Decimal(str(gainer_row["price"]["lastPrice"]))
+            volume_rank = int(volume_row.get("rank", 101))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if price <= 0 or change_percent < AUTO_MIN_DAILY_CHANGE_PERCENT:
+            continue
+        quote = Quote(symbol=symbol, name=names.get(symbol), price=price, timestamp=now_utc())
+        score = change_percent * 0.7 + max(0, 101 - volume_rank) * 0.3
+        candidates.append({
+            "quote": quote,
+            "change_rate": change_percent,
+            "volume_rank": volume_rank,
+            "volume": volume_row.get("tradingVolume", "0"),
+            "score": round(score, 3),
+        })
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)
+
+
+async def _auto_trade_loop(initial_candidates: list[dict] | None = None) -> None:
+    while trader.strategy.running:
+        try:
+            candidates = initial_candidates if initial_candidates is not None else await _market_momentum_candidates()
+            initial_candidates = None
+            for candidate in candidates:
+                trader.set_quote(candidate["quote"])
+            position = trader.positions.get(trader.strategy.symbol)
+            if position and position.quantity > 0 and not any(item["quote"].symbol == trader.strategy.symbol for item in candidates):
+                trader.set_quote(await toss.quote(trader.strategy.symbol))
+            trader.run_momentum_strategy(candidates)
             trader.strategy.last_error = None
         except (TossApiError, ValueError) as exc:
             trader.strategy.last_error = str(exc)
@@ -40,8 +93,10 @@ async def _auto_trade_loop(symbol: str) -> None:
         await asyncio.sleep(AUTO_TRADE_INTERVAL_SECONDS)
 
 
-async def _stop_auto_trade_loop() -> None:
-    global strategy_task
+async def _stop_auto_trade_loop(*, invalidate_pending: bool = True) -> None:
+    global strategy_task, strategy_command_id
+    if invalidate_pending:
+        strategy_command_id += 1
     trader.stop_strategy()
     task = strategy_task
     strategy_task = None
@@ -205,23 +260,53 @@ def strategy_status() -> StrategyStatus:
     return trader.strategy
 
 
-@app.post("/api/v1/strategies/sma/start", response_model=StrategyStatus)
-async def start_strategy(symbol: str = "005930") -> StrategyStatus:
-    global strategy_task
-    symbol = symbol.strip()
-    if not symbol:
-        raise HTTPException(400, "자동매매할 종목코드를 입력하세요.")
-    if trader.strategy.running and trader.strategy.symbol == symbol and strategy_task and not strategy_task.done():
+@app.post("/api/v1/strategies/momentum/start", response_model=StrategyStatus)
+@app.post("/api/v1/strategies/sma/start", response_model=StrategyStatus, include_in_schema=False)
+async def start_strategy(symbol: str | None = None) -> StrategyStatus:
+    global strategy_task, strategy_command_id
+    if trader.strategy.running and strategy_task and not strategy_task.done():
         return trader.strategy
-    if strategy_task and not strategy_task.done():
-        await _stop_auto_trade_loop()
-    trader.start_strategy(symbol)
+
+    strategy_command_id += 1
+    command_id = strategy_command_id
+    try:
+        async with asyncio.timeout(25):
+            initial_candidates = await _market_momentum_candidates()
+            open_positions = [position for position in trader.positions.values() if position.quantity > 0]
+            if not open_positions:
+                initial_candidates = [
+                    item for item in initial_candidates
+                    if item["quote"].price <= trader.account().daily_auto_buy_remaining
+                ]
+    except TimeoutError as exc:
+        raise HTTPException(503, "추천 종목과 시세 확인 시간이 초과되었습니다. 다시 시작해 주세요.") from exc
+    except TossApiError as exc:
+        raise HTTPException(503, f"토스 시장 랭킹을 가져오지 못했습니다: {exc}") from exc
+    if command_id != strategy_command_id:
+        raise HTTPException(409, "자동매매 시작 요청이 취소되었습니다.")
+    await _stop_auto_trade_loop(invalidate_pending=False)
+    if command_id != strategy_command_id:
+        raise HTTPException(409, "자동매매 시작 요청이 취소되었습니다.")
+    if open_positions:
+        active_symbol = open_positions[0].symbol
+        active_quote = trader.quotes.get(active_symbol)
+        active_name = active_quote.name if active_quote else None
+    elif initial_candidates:
+        active_quote = initial_candidates[0]["quote"]
+        active_symbol = active_quote.symbol
+        active_name = active_quote.name
+    else:
+        active_symbol = "AUTO"
+        active_name = "시장 전체 스캔"
+    trader.start_strategy(active_symbol)
+    trader.strategy.symbol_name = active_name
     trader.strategy.poll_interval_seconds = AUTO_TRADE_INTERVAL_SECONDS
-    strategy_task = asyncio.create_task(_auto_trade_loop(symbol))
+    strategy_task = asyncio.create_task(_auto_trade_loop(initial_candidates))
     return trader.strategy
 
 
-@app.post("/api/v1/strategies/sma/stop", response_model=StrategyStatus)
+@app.post("/api/v1/strategies/momentum/stop", response_model=StrategyStatus)
+@app.post("/api/v1/strategies/sma/stop", response_model=StrategyStatus, include_in_schema=False)
 async def stop_strategy() -> StrategyStatus:
     await _stop_auto_trade_loop()
     return trader.strategy

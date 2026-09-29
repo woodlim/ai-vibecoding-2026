@@ -19,13 +19,41 @@ const suggestionBox = document.createElement('div'); suggestionBox.className = '
 document.querySelector('#quoteLookupForm').parentElement.style.position = 'relative';
 const suggestionStyle = document.createElement('style'); suggestionStyle.textContent = '.stock-suggestions{position:absolute;z-index:5;margin-top:6px;width:min(360px,90%);background:#151e35;border:1px solid #40547b;border-radius:10px;overflow:hidden;box-shadow:0 12px 28px #0005}.stock-suggestions button{display:flex;justify-content:space-between;width:100%;height:auto;padding:12px 14px;border:0;border-radius:0;background:transparent;color:#eef3ff;text-align:left;box-shadow:none}.stock-suggestions button:hover{background:#24365d;transform:none}.stock-suggestions small{color:#91a0bd}'; document.head.appendChild(suggestionStyle);
 const fallbackStocks = [{name:'삼성전자',symbol:'005930',market:'KOSPI'},{name:'삼성전기',symbol:'009150',market:'KOSPI'},{name:'삼성SDI',symbol:'006400',market:'KOSPI'},{name:'삼성물산',symbol:'028260',market:'KOSPI'},{name:'삼성바이오로직스',symbol:'207940',market:'KOSPI'},{name:'LG전자',symbol:'066570',market:'KOSPI'},{name:'LG화학',symbol:'051910',market:'KOSPI'},{name:'LG에너지솔루션',symbol:'373220',market:'KOSPI'},{name:'LG생활건강',symbol:'051900',market:'KOSPI'},{name:'LG디스플레이',symbol:'034220',market:'KOSPI'},{name:'SK하이닉스',symbol:'000660',market:'KOSPI'},{name:'NAVER',symbol:'035420',market:'KOSPI'}];
-const recommendedStocks = [{name:'삼성전자',symbol:'005930'},{name:'SK하이닉스',symbol:'000660'},{name:'NAVER',symbol:'035420'},{name:'현대차',symbol:'005380'},{name:'카카오',symbol:'035720'}];
+let selectedRecommendationSymbol = '';
+let selectedRecommendationName = '';
+let currentStrategyStatus = { running: false, symbol: '' };
+let pendingStrategyAction = '';
+let strategyCommandSequence = 0;
+let refreshSequence = 0;
+function syncStrategyControls() {
+  const selected = $('selectedStrategyStock');
+  const startButton = $('strategyButton');
+  const stopButton = $('killButton');
+  if (selected) selected.textContent = '추천 TOP 5는 참고용이며 자동매매 대상은 국내 거래량·등락률 랭킹에서 별도로 찾습니다.';
+  if (startButton) {
+    const alreadyRunning = currentStrategyStatus.running;
+    startButton.disabled = Boolean(pendingStrategyAction) || alreadyRunning;
+    startButton.textContent = pendingStrategyAction === 'start' ? '시작 준비 중…' : alreadyRunning ? '자동매매 실행 중' : '자동매매 시작';
+  }
+  if (stopButton) {
+    stopButton.disabled = pendingStrategyAction === 'stop';
+    stopButton.textContent = pendingStrategyAction === 'stop' ? '중지 중…' : '자동매매 중지';
+  }
+}
+function selectRecommendation(symbol, name) {
+  selectedRecommendationSymbol = symbol;
+  selectedRecommendationName = name || symbol;
+  document.querySelectorAll('#recommendations .recommend-card').forEach(card => {
+    card.classList.toggle('selected', card.querySelector('small')?.textContent.trim() === symbol);
+    card.setAttribute('aria-pressed', String(card.classList.contains('selected')));
+  });
+  syncStrategyControls();
+}
 let searchTimer;
 $('lookupSymbol').addEventListener('input', () => { clearTimeout(searchTimer); const query = $('lookupSymbol').value.trim(); if (!query) { suggestionBox.innerHTML = ''; suggestionBox.style.display = 'none'; return; } searchTimer = setTimeout(async () => { let items = []; try { items = await api(`/api/v1/stocks/search?q=${encodeURIComponent(query)}`); } catch { items = []; } if (!items.length) items = fallbackStocks.filter(item => item.name.includes(query) || item.symbol.includes(query)); suggestionBox.innerHTML = items.map(item => `<button type="button" data-symbol="${item.symbol}"><span><b>${item.name}</b><br><small>${item.symbol} · ${item.market}</small></span><span>›</span></button>`).join(''); suggestionBox.style.display = items.length ? 'block' : 'none'; suggestionBox.querySelectorAll('button').forEach(button => button.onclick = () => { $('lookupSymbol').value = button.dataset.symbol; suggestionBox.innerHTML = ''; suggestionBox.style.display = 'none'; }); }, 300); });
 function safeMarketTime(value) { const date = value ? new Date(value) : null; return date && !Number.isNaN(date.getTime()) && date.getFullYear() >= 2000 ? date.toLocaleString('ko-KR') : new Date().toLocaleString('ko-KR') + ' (조회 시각)'; }
 async function loadMarketStatus() { try { const items = await api('/api/v1/market-indicators'); const kospi = items.find(item => item.symbol === 'KOSPI'); $('marketStatus').innerHTML = `<span>코스피</span><strong>${kospi ? Number(kospi.lastPrice).toLocaleString('ko-KR', {maximumFractionDigits:2}) : '-'}</strong><small>${kospi ? safeMarketTime(kospi.timestamp) : '데이터 없음'}</small>`; } catch (error) { $('marketStatus').innerHTML = `<span>코스피</span><strong class="error">조회 실패</strong><small>${error.message}</small>`; } }
 loadMarketStatus();
-async function loadRecommendations() { try { const account = await api('/api/v1/account'); const budget = Number(account.initial_cash) * 0.4; const quotes = await api(`/api/v1/quotes-batch/live?symbols=${recommendedStocks.map(stock => stock.symbol).join(',')}`); const quoteMap = Object.fromEntries(quotes.map(quote => [quote.symbol, quote])); $('recommendations').innerHTML = recommendedStocks.map((stock, index) => { const quote = quoteMap[stock.symbol]; const price = quote ? Number(quote.price) : 0; const quantity = price ? Math.max(1, Math.floor(budget / 5 / price)) : 0; return `<div class="recommend-card"><div class="recommend-rank">#${index + 1} · 참고</div><strong>${stock.name}</strong><small>${stock.symbol}</small><b>${price ? money(price) : '시세 없음'}</b><p>추천금액 기준 약 ${quantity}주</p></div>`; }).join(''); } catch (error) { $('recommendations').textContent = error.message; } }
 // 추천 목록은 일봉 상승률·거래량 기반 동적 API를 사용합니다.
 async function loadDynamicRecommendations() {
   const retryButton = $('findRecommendations');
@@ -34,8 +62,9 @@ async function loadDynamicRecommendations() {
   $('recommendations').textContent = '거래 데이터를 분석하고 있습니다...';
   try {
     const account = await api('/api/v1/account');
-    const budget = Number(account.initial_cash) * 0.4;
+    const budget = Number(account.daily_auto_buy_remaining ?? 0);
     const items = await api('/api/v1/recommendations');
+    items.forEach(item => { if (item.name) orderStockNames.set(item.symbol, item.name); });
     if (!items.length) throw new Error('분석할 수 있는 종목 데이터가 없습니다.');
     let prices = {};
     try {
@@ -47,17 +76,13 @@ async function loadDynamicRecommendations() {
     $('recommendations').innerHTML = items.map((item, index) => {
       const price = prices[item.symbol] || 0;
       const quantity = price ? Math.floor(budget / price) : 0;
-      return `<div class="recommend-card"><div class="recommend-rank">#${index + 1} · ${item.score}점</div><strong>${item.name}</strong><small>${item.symbol}</small><b>${price ? money(price) : '시세 대기 중'}</b><p>등락률 ${item.change_rate}% · 거래량 ${item.volume}배<br>${price ? `최대 ${quantity}주 매수 가능` : '현재가 연결 후 수량 계산'}</p><button class="recommend-buy" data-symbol="${item.symbol}" data-quantity="${quantity}" ${price ? '' : 'disabled'}>PAPER 매수</button></div>`;
+      return `<div class="recommend-card" data-price="${price}" role="button" tabindex="0" aria-pressed="false"><div class="recommend-rank">#${index + 1} · ${item.score}점</div><strong>${item.name}</strong><small>${item.symbol}</small><b>${price ? money(price) : '시세 대기 중'}</b><p>등락률 ${item.change_rate}% · 거래량 ${item.volume}배<br><span class="recommend-quantity">${price ? `최대 ${quantity}주 매수 가능` : '현재가 연결 후 수량 계산'}</span></p><span class="subtle">종목 차트 보기 · 추천은 참고용</span></div>`;
     }).join('');
-    document.querySelectorAll('#recommendations .recommend-card').forEach(card => {
-      const symbol = card.querySelector('small')?.textContent.trim();
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'recommend-auto-start';
-      button.dataset.symbol = symbol;
-      button.textContent = '자동매매 시작';
-      card.append(button);
-    });
+    if (selectedRecommendationSymbol) selectRecommendation(selectedRecommendationSymbol, selectedRecommendationName);
+    else if (currentStrategyStatus.running) {
+      const activeRecommendation = items.find(item => item.symbol === currentStrategyStatus.symbol);
+      if (activeRecommendation) selectRecommendation(activeRecommendation.symbol, activeRecommendation.name);
+    }
   } catch (error) {
     $('recommendations').textContent = `추천 종목을 불러오지 못했습니다. ${error.message}`;
   } finally {
@@ -65,31 +90,16 @@ async function loadDynamicRecommendations() {
     retryButton.textContent = '후보 찾기';
   }
 }
-document.addEventListener('click', async (event) => {
-  const button = event.target.closest('.recommend-auto-start');
-  if (!button || button.disabled) return;
-  event.stopImmediatePropagation();
-  const symbol = button.dataset.symbol;
-  button.disabled = true;
-  button.textContent = '시작 요청 중...';
-  try {
-    await api(`/api/v1/strategies/sma/start?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' });
-    message('strategyMessage', `${symbol} 자동매매를 시작했습니다. 전략 상태를 확인 중입니다.`);
-    await refresh();
-  } catch (error) {
-    message('strategyMessage', error.message, true);
-    button.disabled = false;
-    button.textContent = '다시 시도';
+// 동적 추천 API가 점수와 수량을 함께 렌더링하므로 별도 덮어쓰기를 하지 않습니다.
+async function showRecommendationChart(symbol, name) { const chart = $('recommendationChart'); chart.innerHTML = '<p>차트를 불러오는 중...</p>'; try { const candles = await api(`/api/v1/candles/${encodeURIComponent(symbol)}?count=30`); if (!candles.length) throw new Error('차트 데이터가 없습니다.'); chart.innerHTML = `<h3>${name} (${symbol}) 최근 거래일 종가</h3><canvas id="recommendationCanvas" height="230"></canvas>`; const canvas = $('recommendationCanvas'); const dpr = window.devicePixelRatio || 1; const width = Math.max(canvas.clientWidth, 320); const height = 230; canvas.width = width * dpr; canvas.height = height * dpr; const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr); const values = candles.map(item => Number(item.close_price)).filter(Number.isFinite); const min = Math.min(...values); const max = Math.max(...values); const pad = { left: 82, right: 14, top: 18, bottom: 30 }; const plotW = width - pad.left - pad.right; const plotH = height - pad.top - pad.bottom; const y = value => pad.top + (max === min ? plotH / 2 : (max - value) / (max - min) * plotH); const x = index => pad.left + (values.length === 1 ? plotW / 2 : index / (values.length - 1) * plotW); ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--border').trim() || '#30405f'; ctx.lineWidth = 1; for (let i = 0; i < 4; i += 1) { const gy = pad.top + i * plotH / 3; ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(width - pad.right, gy); ctx.stroke(); } ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--muted').trim() || '#91a0bd'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right'; for (let i = 0; i < 4; i += 1) { const value = max - (max - min) * i / 3; ctx.fillText(Math.round(value).toLocaleString('ko-KR'), pad.left - 8, pad.top + i * plotH / 3 + 4); } ctx.strokeStyle = '#61a6ff'; ctx.lineWidth = 2.5; ctx.beginPath(); values.forEach((value, index) => { const pointX = x(index); const pointY = y(value); if (index === 0) ctx.moveTo(pointX, pointY); else ctx.lineTo(pointX, pointY); }); ctx.stroke(); ctx.fillStyle = '#61a6ff'; values.forEach((value, index) => { ctx.beginPath(); ctx.arc(x(index), y(value), 2.5, 0, Math.PI * 2); ctx.fill(); }); ctx.globalAlpha = 0.92; candles.forEach((item, index) => { const close = Number(item.close_price); const open = Number(item.open_price ?? close); const high = Number(item.high_price ?? Math.max(open, close)); const low = Number(item.low_price ?? Math.min(open, close)); const candleX = x(index); const step = values.length > 1 ? plotW / (values.length - 1) : plotW; const bodyWidth = Math.max(3, Math.min(10, step * 0.55)); const rising = close >= open; ctx.strokeStyle = rising ? '#ff647c' : '#4f9cff'; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(candleX, y(high)); ctx.lineTo(candleX, y(low)); ctx.stroke(); const top = Math.min(y(open), y(close)); const bodyHeight = Math.max(2, Math.abs(y(open) - y(close))); ctx.fillRect(candleX - bodyWidth / 2, top, bodyWidth, bodyHeight); }); ctx.globalAlpha = 1; ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--muted').trim() || '#91a0bd'; ctx.textAlign = 'center'; [0, Math.floor((values.length - 1) / 2), values.length - 1].forEach(index => { const date = candles[index]?.date || candles[index]?.trade_date || ''; ctx.fillText(String(date).slice(0, 10), x(index), height - 8); }); } catch (error) { chart.innerHTML = `<p class="chart-error">${error.message || '차트를 불러오지 못했습니다.'}</p>`; } }
+document.addEventListener('click', event => { const card = event.target.closest('.recommend-card'); if (!card || event.target.closest('button')) return; const symbol = card.querySelector('small')?.textContent.trim(); const name = card.querySelector('strong')?.textContent.trim() || symbol; if (!symbol) return; selectRecommendation(symbol, name); const chart = $('recommendationChart'); if (chart.dataset.symbol === symbol && chart.querySelector('canvas')) { chart.innerHTML = ''; delete chart.dataset.symbol; return; } chart.dataset.symbol = symbol; showRecommendationChart(symbol, name); });
+const money = (value) => `${Number(value).toLocaleString('ko-KR', { maximumFractionDigits: 0, minimumFractionDigits: 0 })} 원`;
+document.addEventListener('keydown', event => {
+  if (event.target.matches('.recommend-card') && (event.key === 'Enter' || event.key === ' ')) {
+    event.preventDefault();
+    event.target.click();
   }
 });
-async function refreshRecommendationQuantities() { try { const account = await api('/api/v1/account'); const budget = Number(account.initial_cash) * 0.4; const quotes = await api(`/api/v1/quotes-batch/live?symbols=${recommendedStocks.map(stock => stock.symbol).join(',')}`); const quoteMap = Object.fromEntries(quotes.map(q => [q.symbol, q])); document.querySelectorAll('.recommend-card').forEach((card, index) => { const stock = recommendedStocks[index]; const price = Number(quoteMap[stock.symbol]?.price || 0); const quantity = price ? Math.floor(budget / price) : 0; const text = card.querySelector('p'); if (text) text.innerHTML = `추천 사용금액 ${money(budget)}<br>최대 ${quantity}주 매수 가능`; const button = card.querySelector('.recommend-buy'); if (button) button.dataset.quantity = String(quantity); }); } catch {} }
-// 동적 추천 API가 점수와 수량을 함께 렌더링하므로 별도 덮어쓰기를 하지 않습니다.
-setTimeout(() => { document.querySelectorAll('.recommend-card').forEach(card => { const button = card.querySelector('.recommend-buy'); const text = card.querySelector('p'); if (button && text) text.textContent = `최대 ${button.dataset.quantity || 0}주 매수 가능`; }); }, 2500);
-setTimeout(() => { document.querySelectorAll('.recommend-card').forEach((card, index) => { if (!card.querySelector('.recommend-buy')) { const button = document.createElement('button'); button.className = 'recommend-buy'; button.textContent = 'PAPER 매수'; button.dataset.symbol = recommendedStocks[index].symbol; button.dataset.quantity = '1'; card.appendChild(button); } }); }, 1200);
-document.addEventListener('click', async (event) => { const button = event.target.closest('.recommend-buy'); if (!button) return; try { const symbol = button.dataset.symbol; const quantity = button.dataset.quantity; const quotes = await api(`/api/v1/quotes-batch/live?symbols=${symbol}`); await api('/api/v1/quotes', { method: 'POST', body: JSON.stringify({ symbol, price: String(quotes[0].price) }) }); await api('/api/v1/orders', { method: 'POST', body: JSON.stringify({ symbol, side: 'BUY', quantity, client_order_id: `recommend-${symbol}-${Date.now()}` }) }); button.textContent = '매수 완료'; await refresh(); } catch (error) { button.textContent = '시세 조회 후 매수'; } });
-async function showRecommendationChart(symbol, name) { const chart = $('recommendationChart'); chart.innerHTML = '<p>차트를 불러오는 중...</p>'; try { const candles = await api(`/api/v1/candles/${encodeURIComponent(symbol)}?count=30`); if (!candles.length) throw new Error('차트 데이터가 없습니다.'); chart.innerHTML = `<h3>${name} (${symbol}) 최근 거래일 종가</h3><canvas id="recommendationCanvas" height="230"></canvas>`; const canvas = $('recommendationCanvas'); const dpr = window.devicePixelRatio || 1; const width = Math.max(canvas.clientWidth, 320); const height = 230; canvas.width = width * dpr; canvas.height = height * dpr; const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr); const values = candles.map(item => Number(item.close_price)).filter(Number.isFinite); const min = Math.min(...values); const max = Math.max(...values); const pad = { left: 82, right: 14, top: 18, bottom: 30 }; const plotW = width - pad.left - pad.right; const plotH = height - pad.top - pad.bottom; const y = value => pad.top + (max === min ? plotH / 2 : (max - value) / (max - min) * plotH); const x = index => pad.left + (values.length === 1 ? plotW / 2 : index / (values.length - 1) * plotW); ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--border').trim() || '#30405f'; ctx.lineWidth = 1; for (let i = 0; i < 4; i += 1) { const gy = pad.top + i * plotH / 3; ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(width - pad.right, gy); ctx.stroke(); } ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--muted').trim() || '#91a0bd'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right'; for (let i = 0; i < 4; i += 1) { const value = max - (max - min) * i / 3; ctx.fillText(Math.round(value).toLocaleString('ko-KR'), pad.left - 8, pad.top + i * plotH / 3 + 4); } ctx.strokeStyle = '#61a6ff'; ctx.lineWidth = 2.5; ctx.beginPath(); values.forEach((value, index) => { const pointX = x(index); const pointY = y(value); if (index === 0) ctx.moveTo(pointX, pointY); else ctx.lineTo(pointX, pointY); }); ctx.stroke(); ctx.fillStyle = '#61a6ff'; values.forEach((value, index) => { ctx.beginPath(); ctx.arc(x(index), y(value), 2.5, 0, Math.PI * 2); ctx.fill(); }); ctx.globalAlpha = 0.92; candles.forEach((item, index) => { const close = Number(item.close_price); const open = Number(item.open_price ?? close); const high = Number(item.high_price ?? Math.max(open, close)); const low = Number(item.low_price ?? Math.min(open, close)); const candleX = x(index); const step = values.length > 1 ? plotW / (values.length - 1) : plotW; const bodyWidth = Math.max(3, Math.min(10, step * 0.55)); const rising = close >= open; ctx.strokeStyle = rising ? '#ff647c' : '#4f9cff'; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(candleX, y(high)); ctx.lineTo(candleX, y(low)); ctx.stroke(); const top = Math.min(y(open), y(close)); const bodyHeight = Math.max(2, Math.abs(y(open) - y(close))); ctx.fillRect(candleX - bodyWidth / 2, top, bodyWidth, bodyHeight); }); ctx.globalAlpha = 1; ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--muted').trim() || '#91a0bd'; ctx.textAlign = 'center'; [0, Math.floor((values.length - 1) / 2), values.length - 1].forEach(index => { const date = candles[index]?.date || candles[index]?.trade_date || ''; ctx.fillText(String(date).slice(0, 10), x(index), height - 8); }); } catch (error) { chart.innerHTML = `<p class="chart-error">${error.message || '차트를 불러오지 못했습니다.'}</p>`; } }
-document.addEventListener('click', event => { const card = event.target.closest('.recommend-card'); if (!card || event.target.closest('.recommend-buy')) return; const symbol = card.querySelector('small')?.textContent.trim(); const name = card.querySelector('strong')?.textContent.trim() || symbol; const chart = $('recommendationChart'); if (symbol && chart.dataset.symbol === symbol && chart.querySelector('canvas')) { chart.innerHTML = ''; delete chart.dataset.symbol; return; } if (symbol) { chart.dataset.symbol = symbol; showRecommendationChart(symbol, name); } });
-const money = (value) => `${Number(value).toLocaleString('ko-KR', { maximumFractionDigits: 0, minimumFractionDigits: 0 })} 원`;
 const message = (id, text, error = false) => { $(id).textContent = text; $(id).className = error ? 'error' : ''; };
 const priceHistory = {};
 const candleHistory = {};
@@ -103,7 +113,7 @@ const recommendationChart = document.createElement('div'); recommendationChart.i
 $('findRecommendations').addEventListener('click', loadDynamicRecommendations);
 loadDynamicRecommendations();
 const extraStyle = document.createElement('style'); extraStyle.textContent = '.extra-panels{margin-top:16px}.subtle{color:#91a0bd;font-size:12px}.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}.metrics span{display:block;color:#91a0bd;font-size:12px;margin-bottom:6px}.metrics strong{font-size:18px}.positive{color:#36d29a}.negative{color:#ff6b78}small{color:#91a0bd}@media(max-width:520px){.metrics{grid-template-columns:1fr 1fr}}'; document.head.appendChild(extraStyle);
-const recommendationStyle = document.createElement('style'); recommendationStyle.textContent = '.recommendations{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.recommend-card{min-width:0;padding:14px;border:1px solid #30405f;border-radius:12px;background:#18243e;cursor:pointer;transition:.2s}.recommend-card:hover{border-color:#6d91ff;transform:translateY(-2px)}.recommend-rank{color:#36d29a;font-size:11px;font-weight:800}.recommend-card strong{display:block;font-size:15px;margin:9px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.recommend-card small{color:#91a0bd}.recommend-card b{display:block;font-size:18px;margin:14px 0;color:#fff}.recommend-card p{min-height:34px;margin:0 0 10px;color:#91a0bd;font-size:11px}.recommend-buy{width:100%;height:36px;padding:0;font-size:11px}.recommend-card .secondary{float:none;width:100%}.recommendation-chart{margin-top:18px;min-height:20px}.recommendation-chart h3{font-size:14px;margin:0 0 10px}.recommendation-chart canvas{width:100%;height:230px;background:#101a31;border-radius:10px}body.light .recommend-card{background:#fff4f9;border-color:#f1d5e4}body.light .recommend-card b{color:#30233a}body.light .recommendation-chart canvas{background:#fff0f6}@media(max-width:900px){.recommendations{grid-template-columns:repeat(3,1fr)}}@media(max-width:600px){.recommendations{grid-template-columns:repeat(2,1fr)}}'; document.head.appendChild(recommendationStyle);
+const recommendationStyle = document.createElement('style'); recommendationStyle.textContent = '.recommendations{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.recommend-card{min-width:0;padding:14px;border:1px solid #30405f;border-radius:12px;background:#18243e;cursor:pointer;transition:.2s}.recommend-card:hover{border-color:#6d91ff;transform:translateY(-2px)}.recommend-rank{color:#36d29a;font-size:11px;font-weight:800}.recommend-card strong{display:block;font-size:15px;margin:9px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.recommend-card small{color:#91a0bd}.recommend-card b{display:block;font-size:18px;margin:14px 0;color:#fff}.recommend-card p{min-height:34px;margin:0 0 10px;color:#91a0bd;font-size:11px}.recommend-card:focus-visible{outline:2px solid #6d91ff;outline-offset:3px}.recommend-card .secondary{float:none;width:100%}.recommendation-chart{margin-top:18px;min-height:20px}.recommendation-chart h3{font-size:14px;margin:0 0 10px}.recommendation-chart canvas{width:100%;height:230px;background:#101a31;border-radius:10px}body.light .recommend-card{background:#fff4f9;border-color:#f1d5e4}body.light .recommend-card b{color:#30233a}body.light .recommendation-chart canvas{background:#fff0f6}@media(max-width:900px){.recommendations{grid-template-columns:repeat(3,1fr)}}@media(max-width:600px){.recommendations{grid-template-columns:repeat(2,1fr)}}'; document.head.appendChild(recommendationStyle);
 
 function renderHistory(symbol) {
   const candles = candleHistory[symbol] || [];
@@ -118,39 +128,91 @@ async function api(path, options = {}) {
   return data;
 }
 
+const orderStockNames = new Map();
+const orderNameRetryAt = new Map();
+const orderNamesPending = new Set();
+let latestOrderHistory = [];
+const isAutomaticOrder = order => order.source ? order.source === 'AUTO' : /^sma-(buy|sell)-/.test(order.client_order_id || '');
+const escapeText = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
+
+function renderOrderHistory(orders) {
+  latestOrderHistory = orders;
+  const automaticOrders = orders.filter(isAutomaticOrder).slice().reverse();
+  if (!automaticOrders.length) {
+    $('orders').innerHTML = '<p class="subtle">아직 자동매매 내역이 없습니다. 매수·매도 체결 시 이곳에 표시됩니다.</p>';
+    return;
+  }
+  const rows = automaticOrders.map(order => {
+    const name = order.symbol_name || orderStockNames.get(order.symbol) || '종목명 확인 중';
+    const date = new Date(order.created_at);
+    const time = Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false });
+    const quantity = Number(order.filled_quantity ?? order.quantity);
+    const amount = order.total_amount ?? Number(order.price) * quantity;
+    const buy = order.side === 'BUY';
+    const status = { FILLED: '체결 완료', REJECTED: '주문 거절' }[order.status] || order.status;
+    return `<tr><td>${escapeText(time)}</td><td><strong class="trade-stock-name">${escapeText(name)}</strong><small>${escapeText(order.symbol)}</small></td><td><span class="trade-side ${buy ? 'trade-buy' : 'trade-sell'}">${buy ? '매수' : '매도'}</span></td><td class="numeric">${quantity.toLocaleString('ko-KR', { maximumFractionDigits: 8 })}주</td><td class="numeric">${money(order.price)}</td><td class="numeric"><strong>${money(amount)}</strong></td><td>${escapeText(status)}</td></tr>`;
+  }).join('');
+  $('orders').innerHTML = `<table><thead><tr><th scope="col">체결 시각</th><th scope="col">종목명</th><th scope="col">구분</th><th scope="col" class="numeric">체결 수량</th><th scope="col" class="numeric">체결 단가</th><th scope="col" class="numeric">거래금액</th><th scope="col">상태</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function resolveOrderNames(orders, strategy) {
+  if (strategy.symbol_name) orderStockNames.set(strategy.symbol, strategy.symbol_name);
+  orders.forEach(order => { if (order.symbol_name) orderStockNames.set(order.symbol, order.symbol_name); });
+  const symbols = [...new Set(orders.filter(isAutomaticOrder).map(order => order.symbol))];
+  symbols.forEach(async symbol => {
+    if (orderStockNames.has(symbol) || orderNamesPending.has(symbol) || Date.now() < (orderNameRetryAt.get(symbol) || 0)) return;
+    orderNamesPending.add(symbol);
+    try {
+      const matches = await api(`/api/v1/stocks/search?q=${encodeURIComponent(symbol)}`);
+      const stock = matches.find(item => item.symbol === symbol);
+      if (stock?.name) {
+        orderStockNames.set(symbol, stock.name);
+        renderOrderHistory(latestOrderHistory);
+      }
+    } catch { /* Keep the trade visible even when stock-name lookup is unavailable. */ }
+    finally { orderNamesPending.delete(symbol); orderNameRetryAt.set(symbol, Date.now() + 60000); }
+  });
+}
+
 function render(account, orders, strategy) {
+  currentStrategyStatus = strategy;
   $('cash').textContent = money(account.cash);
   $('positionCount').textContent = account.positions.length;
   $('orderCount').textContent = orders.length;
-  document.querySelectorAll('.recommend-auto-start').forEach(button => {
-    const active = strategy.running && strategy.symbol === button.dataset.symbol;
-    button.textContent = active ? '자동매매 실행 중' : strategy.running ? '이 종목으로 변경' : '자동매매 시작';
-    button.disabled = active;
-  });
-  $('strategyState').textContent = strategy.running ? `${strategy.symbol} 실행 중` : '중지';
-  if (strategyHelp) strategyHelp.textContent = `PAPER 자동매매: ${strategy.poll_interval_seconds || 60}초마다 현재가를 확인합니다. 최근 3회 평균이 5회 평균보다 높으면 1주 매수하고, 낮으면 보유량을 매도합니다.`;
-  if (strategy.last_error) message('strategyMessage', strategy.last_error, true);
-  else if (strategy.running) message('strategyMessage', `${strategy.symbol} PAPER 자동매매 · 시세 샘플 ${strategy.price_samples}/5`);
-  $('strategyState').textContent = strategy.running ? '실행 중' : '중지';
-  $('strategyState').textContent = strategy.running ? `${strategy.symbol} 실행 중` : '중지';
-  if (strategy.last_error) message('strategyMessage', strategy.last_error, true);
-  else if (strategy.running) message('strategyMessage', `${strategy.symbol} PAPER 자동매매 · 시세 샘플 ${strategy.price_samples}/5`);
-  if (strategyHelp) strategyHelp.textContent = `추천 종목 카드에서 선택하세요. PAPER 자동매매는 ${strategy.poll_interval_seconds || 60}초마다 시세를 확인해 3회 평균과 5회 평균을 비교합니다.`;
+  syncStrategyControls();
+  $('strategyState').textContent = strategy.running ? (strategy.symbol === 'AUTO' ? '시장 스캔 중' : `${strategy.symbol} 실행 중`) : '중지';
+  if (!pendingStrategyAction) {
+    if (strategy.last_error) message('strategyMessage', strategy.last_error, true);
+    else if (strategy.running) {
+      const signals = { BUY_VOLUME_MOMENTUM: '상승률·거래량 신호로 매수', SELL_MOMENTUM_FADE: '상승·거래량 신호 약화로 매도', SELL_STOP_LOSS: '손절 기준 도달로 매도', BUDGET_LIMIT: '잔여 한도 부족 · 매수 대기', HOLD_MOMENTUM: '상승·거래량 신호 유지 · 보유', NO_SIGNAL: '조건을 만족하는 종목 탐색 중' };
+      const progress = signals[strategy.last_signal] || '시장 랭킹 분석 중';
+      message('strategyMessage', `${strategy.symbol_name || strategy.symbol} PAPER 자동매매 · ${progress} · 오늘 사용 ${money(account.daily_auto_buy_used ?? 0)} / 잔여 ${money(account.daily_auto_buy_remaining ?? 0)}`);
+    } else message('strategyMessage', '자동매매가 중지되어 있습니다. 시작 버튼을 누르면 시세 분석과 자동 주문을 시작합니다.');
+  }
+  if (strategyHelp) strategyHelp.textContent = `국내 전체 시장 거래량 상위권과 당일 상승률 1% 이상 종목이 겹칠 때 점수화합니다. ${strategy.poll_interval_seconds || 60}초마다 확인하며, 매수 한도는 하루 시작 시 가용금액의 40%이고 손실 3% 또는 상승·거래량 신호 이탈 시 매도합니다.`;
   $('positions').innerHTML = account.positions.length
     ? `<table><tr><th>종목</th><th>수량</th><th>현재가</th><th>평가손익</th></tr>${account.positions.map(p => { const current = latestQuotes[p.symbol] || Number(p.average_price); const pnl = (current - Number(p.average_price)) * Number(p.quantity); return `<tr><td>${p.symbol}</td><td>${p.quantity}</td><td>${money(current)}</td><td class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</td></tr>`; }).join('')}</table>`
     : '없음';
-  $('orders').innerHTML = orders.length
-    ? `<table><tr><th>종목</th><th>구분</th><th>수량</th><th>가격</th><th>상태</th></tr>${orders.slice().reverse().map(o => `<tr><td>${o.symbol}</td><td>${o.side === 'BUY' ? '매수' : '매도'}</td><td>${o.quantity}</td><td>${money(o.price)}</td><td>${o.status}</td></tr>`).join('')}</table>`
-    : '없음';
+  resolveOrderNames(orders, strategy);
+  renderOrderHistory(orders);
   const positionValue = account.positions.reduce((total, position) => total + Number(position.quantity) * (latestQuotes[position.symbol] || Number(position.average_price)), 0);
   const totalValue = Number(account.cash) + positionValue;
   const pnl = totalValue - Number(account.initial_cash);
-  const recommendedAmount = Number(account.initial_cash) * 0.4;
-  $('accountSummary').innerHTML = `<div class="metrics"><div><span>가상계좌 금액</span><strong>${money(account.initial_cash)}</strong></div><div><span>추천 사용금액 (40%)</span><strong>${money(recommendedAmount)}</strong></div><div><span>총 평가금액</span><strong>${money(totalValue)}</strong></div><div><span>가용 현금</span><strong>${money(account.cash)}</strong></div><div><span>평가손익</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</strong></div><div><span>수익률</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${(pnl / Number(account.initial_cash) * 100).toFixed(2)}%</strong></div></div>`;
+  const recommendedAmount = Number(account.daily_auto_buy_limit ?? 0);
+  const returnRate = Number(account.initial_cash) > 0 ? pnl / Number(account.initial_cash) * 100 : 0;
+  $('accountSummary').innerHTML = `<div class="metrics"><div><span>가용계좌 금액</span><strong>${money(account.cash)}</strong></div><div title="하루 첫 자동매매 시작 시 가용금액의 40%로 확정되는 일일 매수 한도"><span>하루 추천 사용금액(40%)</span><strong>${money(recommendedAmount)}</strong></div><div><span>평가손익</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</strong></div><div><span>수익률</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${returnRate.toFixed(2)}%</strong></div></div>`;
+  document.querySelectorAll('#recommendations .recommend-card').forEach(card => {
+    const price = Number(card.dataset.price || 0);
+    const quantity = price > 0 ? Math.max(0, Math.floor(Number(account.daily_auto_buy_remaining ?? 0) / price)) : 0;
+    const label = card.querySelector('.recommend-quantity');
+    if (label) label.textContent = price > 0 ? `최대 ${quantity}주 매수 가능` : '현재가 연결 후 수량 계산';
+  });
 }
 
 
 async function refresh() {
+  const request = ++refreshSequence;
+  const command = strategyCommandSequence;
   const [account, orders, strategy] = await Promise.all([api('/api/v1/account'), api('/api/v1/orders'), api('/api/v1/strategies/status')]);
   await Promise.all(account.positions.map(async (position) => {
     try {
@@ -158,7 +220,7 @@ async function refresh() {
       latestQuotes[position.symbol] = Number(quote.price);
     } catch {}
   }));
-  render(account, orders, strategy);
+  if (request === refreshSequence && command === strategyCommandSequence) render(account, orders, strategy);
 }
 
 let liveTimer = null;
@@ -168,8 +230,6 @@ async function loadLiveQuote() {
     const quotes = await api(`/api/v1/quotes-batch/live?symbols=${encodeURIComponent(symbol)}`);
     for (const quote of quotes) {
       latestQuotes[quote.symbol] = Number(quote.price);
-      // 실시간 가격을 PAPER 주문 엔진에도 반영해 조회 직후 주문할 수 있게 한다.
-      await api('/api/v1/quotes', { method: 'POST', body: JSON.stringify({ symbol: quote.symbol, price: String(quote.price) }) });
       if (!priceHistory[quote.symbol] || priceHistory[quote.symbol].length < 2) {
         const candles = await api(`/api/v1/candles/${encodeURIComponent(quote.symbol)}?count=60`);
         candleHistory[quote.symbol] = candles;
@@ -195,56 +255,56 @@ $('quoteLookupForm').addEventListener('submit', async (event) => {
 });
 $('lookupSymbol').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('quoteLookupForm').requestSubmit(); } });
 
-$('orderForm').addEventListener('submit', async (event) => { event.preventDefault(); try { const order = await api('/api/v1/orders', { method: 'POST', body: JSON.stringify({ symbol: $('orderSymbol').value, side: $('side').value, quantity: $('quantity').value }) }); message('orderMessage', `${order.side === 'BUY' ? '매수' : '매도'} 체결 완료`); await refresh(); } catch (error) { message('orderMessage', error.message, true); } });
-$('strategyButton').onclick = async () => { try { const symbol = $('lookupSymbol').value.split(',')[0].trim(); const result = await api(`/api/v1/strategies/sma/start?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' }); message('strategyMessage', result.last_signal ? `${result.last_signal} 신호 발생` : '시세 데이터 5개가 필요합니다.'); await refresh(); } catch (error) { message('strategyMessage', error.message, true); } };
-$('killButton').onclick = async () => { await api('/api/v1/system/kill-switch', { method: 'POST' }); message('strategyMessage', '전략을 중지했습니다.'); await refresh(); };
 $('refreshButton').onclick = refresh;
 refresh().catch(error => message('strategyMessage', error.message, true));
-const strategySymbolInput = document.createElement('input');
-strategySymbolInput.id = 'strategySymbol';
-strategySymbolInput.value = '005930';
-strategySymbolInput.maxLength = 20;
-strategySymbolInput.placeholder = '종목코드';
-strategySymbolInput.setAttribute('aria-label', '자동매매 종목코드');
-const strategyInputLabel = document.createElement('label');
-strategyInputLabel.className = 'strategy-symbol-label';
-strategyInputLabel.textContent = '종목코드';
-strategyInputLabel.append(strategySymbolInput);
-const strategyControls = document.createElement('div');
-strategyControls.className = 'strategy-controls';
-strategyControls.append(strategyInputLabel);
-document.querySelector('#strategyButton').before(strategyControls);
 document.querySelector('#strategyButton').textContent = '자동매매 시작';
-document.querySelector('#killButton').textContent = '중지 / Kill switch';
-strategyHelp = document.createElement('p');
-strategyHelp.className = 'subtle';
-strategyHelp.textContent = 'PAPER 자동매매: 60초마다 현재가를 확인합니다. 최근 3회 평균이 5회 평균보다 높으면 1주 매수하고, 낮으면 보유량을 매도합니다.';
-document.querySelector('#strategyMessage').before(strategyHelp);
+document.querySelector('#killButton').textContent = '자동매매 중지';
+strategyHelp = $('strategyHelp');
 const strategyStyle = document.createElement('style');
-strategyStyle.textContent = '.strategy-controls{display:flex;align-items:center;margin:8px 0}.strategy-symbol-label{display:flex;align-items:center;gap:8px;color:#91a0bd;font-size:12px}.strategy-controls input{width:150px}.strategy-help{font-size:12px;line-height:1.6}button:disabled{opacity:.5;cursor:not-allowed;transform:none}';
+strategyStyle.textContent = '.selected-strategy-stock{margin:10px 0;color:#91a0bd;font-size:13px}.recommend-card.selected{border-color:#6d91ff;box-shadow:0 0 0 2px #6d91ff55}body.light .recommend-card.selected{border-color:#d74c83;box-shadow:0 0 0 2px #d74c8355}button:disabled{opacity:.5;cursor:not-allowed;transform:none}';
 document.head.appendChild(strategyStyle);
+const selectedStrategyStock = document.createElement('p');
+selectedStrategyStock.id = 'selectedStrategyStock';
+selectedStrategyStock.className = 'selected-strategy-stock';
+document.querySelector('#strategyButton').before(selectedStrategyStock);
+syncStrategyControls();
 document.querySelector('#strategyButton').onclick = async () => {
+  if (pendingStrategyAction) return;
+  const command = ++strategyCommandSequence;
+  pendingStrategyAction = 'start';
+  syncStrategyControls();
+  message('strategyMessage', '추천 종목과 시세 연결을 확인하고 자동매매를 준비하고 있습니다…');
   try {
-    const symbol = strategySymbolInput.value.trim();
-    if (!symbol) throw new Error('자동매매 종목코드를 입력하세요.');
-    await api(`/api/v1/strategies/sma/start?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' });
-    message('strategyMessage', `${symbol} PAPER 자동매매를 시작했습니다.`);
+    const status = await api('/api/v1/strategies/sma/start', { method: 'POST' });
+    if (command !== strategyCommandSequence) return;
+    currentStrategyStatus = status;
+    pendingStrategyAction = '';
+    syncStrategyControls();
+    message('strategyMessage', '국내 전체 시장의 상승률·거래량 상위 후보를 분석해 PAPER 자동매매를 시작했습니다.');
     await refresh();
-  } catch (error) { message('strategyMessage', error.message, true); }
+  } catch (error) { if (command === strategyCommandSequence) message('strategyMessage', error.message, true); }
+  finally {
+    if (command === strategyCommandSequence) { pendingStrategyAction = ''; syncStrategyControls(); }
+  }
 };
-strategyControls.remove();
-document.querySelector('#strategyButton').remove();
-strategyHelp.textContent = '추천 종목 카드에서 자동매매할 종목을 선택하세요. PAPER 모드에서만 주문합니다.';
+strategyHelp.textContent = '추천 종목은 참고용입니다. 자동매매는 국내 전체 시장의 상승률·거래량 상위 후보를 분석하며, 하루 매수 한도는 가용금액의 40%입니다.';
 document.querySelector('#killButton').onclick = async () => {
+  if (pendingStrategyAction === 'stop') return;
+  const command = ++strategyCommandSequence;
+  pendingStrategyAction = 'stop';
+  syncStrategyControls();
+  message('strategyMessage', '자동매매를 중지하고 있습니다…');
   try {
-    await api('/api/v1/system/kill-switch', { method: 'POST' });
-    message('strategyMessage', '자동매매를 중지했습니다.');
+    currentStrategyStatus = await api('/api/v1/strategies/sma/stop', { method: 'POST' });
+    pendingStrategyAction = '';
+    syncStrategyControls();
+    message('strategyMessage', '자동매매를 중지했습니다. 보유 주식은 유지됩니다.');
     await refresh();
   } catch (error) { message('strategyMessage', error.message, true); }
+  finally {
+    if (command === strategyCommandSequence) { pendingStrategyAction = ''; syncStrategyControls(); }
+  }
 };
 setInterval(async () => {
-  try { const status = await api('/api/v1/strategies/status'); if (status.running) await refresh(); } catch {}
+  try { await refresh(); } catch (error) { message('strategyMessage', `상태 확인 실패: ${error.message}`, true); }
 }, 5000);
-const autoRecommendationStyle = document.createElement('style');
-autoRecommendationStyle.textContent = '.recommend-auto-start{width:100%;height:34px;margin-top:7px;padding:0 8px;background:#263758;color:#c6d7ff;border:1px solid #40547b;box-shadow:none;font-size:11px}.recommend-auto-start:hover{background:#31466f}.recommend-auto-start:disabled{opacity:.65;cursor:default}body.light .recommend-auto-start{background:#fff0f6;color:#8b4265;border-color:#e8b8cf}';
-document.head.appendChild(autoRecommendationStyle);
