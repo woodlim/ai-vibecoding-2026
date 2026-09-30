@@ -59,6 +59,11 @@ class Order(BaseModel):
         return self.price * self.filled_quantity
 
 
+class PositionSellRequest(BaseModel):
+    quantity: Decimal = Field(gt=0)
+    client_order_id: str = Field(min_length=1, max_length=36)
+
+
 class Position(BaseModel):
     symbol: str
     quantity: Decimal
@@ -74,6 +79,11 @@ class Account(BaseModel):
     daily_auto_buy_limit: Decimal
     daily_auto_buy_used: Decimal
     daily_auto_buy_remaining: Decimal
+    auto_buy_budget_percent: Decimal
+
+
+class AutoBudgetRequest(BaseModel):
+    percent: Decimal = Field(ge=0, le=100)
 
 
 class StrategyStatus(BaseModel):
@@ -82,6 +92,29 @@ class StrategyStatus(BaseModel):
     symbol_name: str | None = None
     last_signal: str | None = None
     price_samples: int = 0
+    buy_tranches_used: int = 0
+    max_buy_tranches: int = 4
     poll_interval_seconds: int = 60
     last_checked_at: datetime | None = None
     last_error: str | None = None
+    max_positions: int = 5
+    managed_symbols: list[str] = Field(default_factory=list)
+
+
+class PaperState(BaseModel):
+    version: Literal[1] = 1
+    initial_cash: Decimal = Field(ge=0)
+    cash: Decimal = Field(ge=0)
+    auto_budget_percent: Decimal = Field(ge=0, le=100)
+    positions: list[Position]
+    orders: list[Order]
+    quotes: list[Quote]
+    strategy: StrategyStatus
+    budget_date: date | None = None
+    budget_basis_cash: Decimal = Field(default=0, ge=0)
+    daily_limit: Decimal = Field(default=0, ge=0)
+    daily_used: Decimal = Field(default=0, ge=0)
+    buy_rounds: int = Field(default=0, ge=0, le=4)
+    last_buy_at: datetime | None = None
+    blocked_symbols: list[str] = Field(default_factory=list)
+    symbol_buy_used: dict[str, Decimal] = Field(default_factory=dict)

@@ -28,6 +28,30 @@ def test_budget_uses_available_cash_and_account_preview_does_not_freeze_it():
     assert trader.account().daily_auto_buy_limit == 160
 
 
+def test_user_can_change_percent_and_recalculate_current_day_limit():
+    trader = PaperTrader(Decimal(1000))
+    trader.start_strategy("A")
+    assert trader.account().daily_auto_buy_limit == 400
+
+    account = trader.set_auto_budget_percent(Decimal(60))
+    assert account.auto_buy_budget_percent == 60
+    assert account.daily_auto_buy_limit == 600
+
+    feed(trader, "A", [60, 70, 80, 90, 100])
+    assert trader.account().daily_auto_buy_used == 600
+    account = trader.set_auto_budget_percent(Decimal(30))
+    assert account.daily_auto_buy_limit == 300
+    assert account.daily_auto_buy_used == 600
+    assert account.daily_auto_buy_remaining == 0
+
+
+@pytest.mark.parametrize("percent", [Decimal("-0.1"), Decimal("100.1")])
+def test_user_budget_percent_must_be_between_zero_and_one_hundred(percent):
+    trader = PaperTrader(Decimal(1000))
+    with pytest.raises(ValueError, match="0~100%"):
+        trader.set_auto_budget_percent(percent)
+
+
 def test_signal_buys_maximum_whole_shares_within_forty_percent():
     trader = PaperTrader(Decimal(1000))
     trader.start_strategy("A")

@@ -112,7 +112,8 @@ document.querySelector('footer').insertAdjacentHTML('beforebegin', '<section cla
 const recommendationChart = document.createElement('div'); recommendationChart.id = 'recommendationChart'; recommendationChart.className = 'recommendation-chart'; document.querySelector('#recommendations').after(recommendationChart);
 $('findRecommendations').addEventListener('click', loadDynamicRecommendations);
 loadDynamicRecommendations();
-const extraStyle = document.createElement('style'); extraStyle.textContent = '.extra-panels{margin-top:16px}.subtle{color:#91a0bd;font-size:12px}.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}.metrics span{display:block;color:#91a0bd;font-size:12px;margin-bottom:6px}.metrics strong{font-size:18px}.positive{color:#36d29a}.negative{color:#ff6b78}small{color:#91a0bd}@media(max-width:520px){.metrics{grid-template-columns:1fr 1fr}}'; document.head.appendChild(extraStyle);
+const extraStyle = document.createElement('style'); extraStyle.textContent = '.extra-panels{margin-top:16px}.subtle{color:#91a0bd;font-size:12px}.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}.metrics span{display:block;color:#91a0bd;font-size:12px;margin-bottom:6px}.metrics strong{font-size:18px}.metrics .total-assets{grid-column:1/-1;padding:14px;border:1px solid #40547b;border-radius:12px;background:#151e35}.total-assets strong{display:block;font-size:26px}.total-assets small{display:block;margin-top:5px;color:#91a0bd;font-size:11px}.positive{color:#36d29a}.negative{color:#ff6b78}small{color:#91a0bd}body.light .metrics .total-assets{background:#fff4f9;border-color:#f0cfdf}body.light .total-assets small{color:#9d7188}@media(max-width:520px){.metrics{grid-template-columns:1fr 1fr}}'; document.head.appendChild(extraStyle);
+const budgetStyle = document.createElement('style'); budgetStyle.textContent = '.budget-setting{display:grid;gap:7px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border,#30405f)}.budget-setting label{font-size:12px;color:var(--muted,#91a0bd)}.budget-setting>div{display:flex;align-items:center;gap:8px}.budget-setting input{width:90px;height:36px;padding:0 10px}.budget-setting button{height:36px;padding:0 14px}.budget-status{min-height:16px;font-size:11px}.budget-status.positive{color:#36d29a}.budget-status.negative{color:#ff6b78}'; document.head.appendChild(budgetStyle);
 const recommendationStyle = document.createElement('style'); recommendationStyle.textContent = '.recommendations{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.recommend-card{min-width:0;padding:14px;border:1px solid #30405f;border-radius:12px;background:#18243e;cursor:pointer;transition:.2s}.recommend-card:hover{border-color:#6d91ff;transform:translateY(-2px)}.recommend-rank{color:#36d29a;font-size:11px;font-weight:800}.recommend-card strong{display:block;font-size:15px;margin:9px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.recommend-card small{color:#91a0bd}.recommend-card b{display:block;font-size:18px;margin:14px 0;color:#fff}.recommend-card p{min-height:34px;margin:0 0 10px;color:#91a0bd;font-size:11px}.recommend-card:focus-visible{outline:2px solid #6d91ff;outline-offset:3px}.recommend-card .secondary{float:none;width:100%}.recommendation-chart{margin-top:18px;min-height:20px}.recommendation-chart h3{font-size:14px;margin:0 0 10px}.recommendation-chart canvas{width:100%;height:230px;background:#101a31;border-radius:10px}body.light .recommend-card{background:#fff4f9;border-color:#f1d5e4}body.light .recommend-card b{color:#30233a}body.light .recommendation-chart canvas{background:#fff0f6}@media(max-width:900px){.recommendations{grid-template-columns:repeat(3,1fr)}}@media(max-width:600px){.recommendations{grid-template-columns:repeat(2,1fr)}}'; document.head.appendChild(recommendationStyle);
 
 function renderHistory(symbol) {
@@ -124,9 +125,50 @@ function renderHistory(symbol) {
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || '요청에 실패했습니다.');
+  if (!response.ok) {
+    const error = new Error(data.detail || '요청에 실패했습니다.');
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
+
+let autoBudgetPercentDraft = null;
+const accountSummary = $('accountSummary');
+accountSummary.addEventListener('input', event => {
+  if (event.target.id === 'autoBudgetPercent') autoBudgetPercentDraft = event.target.value;
+});
+accountSummary.addEventListener('submit', async event => {
+  if (event.target.id !== 'autoBudgetForm') return;
+  event.preventDefault();
+  const input = $('autoBudgetPercent');
+  const percent = Number(input.value);
+  const status = $('autoBudgetStatus');
+  if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+    status.textContent = '0~100% 사이로 입력해 주세요.';
+    status.className = 'budget-status negative';
+    return;
+  }
+  const button = $('saveAutoBudget');
+  button.disabled = true;
+  status.textContent = '저장 중…';
+  status.className = 'budget-status';
+  try {
+    await api('/api/v1/settings/auto-budget', {
+      method: 'PUT',
+      body: JSON.stringify({ percent }),
+    });
+    autoBudgetPercentDraft = null;
+    status.textContent = '저장했고 오늘 매수 한도에 반영했습니다.';
+    status.className = 'budget-status positive';
+    await refresh();
+  } catch (error) {
+    status.textContent = error.message;
+    status.className = 'budget-status negative';
+  } finally {
+    button.disabled = false;
+  }
+});
 
 const orderStockNames = new Map();
 const orderNameRetryAt = new Map();
@@ -134,22 +176,72 @@ const orderNamesPending = new Set();
 let latestOrderHistory = [];
 const isAutomaticOrder = order => order.source ? order.source === 'AUTO' : /^sma-(buy|sell)-/.test(order.client_order_id || '');
 const escapeText = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
+const pendingSells = new Set();
+let displayedPositions = [];
+
+function renderPositions() {
+  $('positions').innerHTML = displayedPositions.length
+    ? `<table><thead><tr><th>종목</th><th>수량</th><th>현재가</th><th>평가손익</th><th>상태</th><th>매도</th></tr></thead><tbody>${displayedPositions.map(p => {
+      const current = latestQuotes[p.symbol] || Number(p.average_price);
+      const pnl = (current - Number(p.average_price)) * Number(p.quantity);
+      const pending = pendingSells.has(p.symbol);
+      const name = orderStockNames.get(p.symbol) || p.symbol;
+      return `<tr><td><strong class="trade-stock-name">${escapeText(name)}</strong><small>${escapeText(p.symbol)}</small></td><td>${escapeText(p.quantity)}주</td><td>${money(current)}</td><td class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</td><td>${pending ? '매도 중' : '보유 중'}</td><td><button type="button" class="danger position-sell" data-sell-symbol="${escapeText(p.symbol)}" aria-label="${escapeText(name)} 전량 PAPER 매도" ${pending ? 'disabled' : ''}>${pending ? '처리 중…' : '전량 매도'}</button></td></tr>`;
+    }).join('')}</tbody></table>`
+    : '보유 주식이 없습니다.';
+}
+
+$('positions').addEventListener('click', async event => {
+  const button = event.target.closest('[data-sell-symbol]');
+  if (!button) return;
+  const symbol = button.dataset.sellSymbol;
+  if (pendingSells.has(symbol)) return;
+  const position = displayedPositions.find(p => p.symbol === symbol);
+  if (!position) return;
+  const name = orderStockNames.get(symbol) || symbol;
+  if (!window.confirm(`${name} (${symbol}) ${position.quantity}주를 전량 PAPER 매도할까요?\n최신 조회 시세로 가상 체결되며 표시 가격과 다를 수 있습니다.\n이 종목은 오늘 자동 재매수하지 않습니다. 다른 종목의 자동매매는 계속됩니다.`)) return;
+  pendingSells.add(symbol);
+  ++refreshSequence;
+  renderPositions();
+  message('sellMessage', `${name} 최신 시세 확인 및 매도 중…`);
+  try {
+    const order = await api(`/api/v1/positions/${encodeURIComponent(symbol)}/sell`, {
+      method: 'POST',
+      body: JSON.stringify({ quantity: String(position.quantity), client_order_id: crypto.randomUUID() }),
+    });
+    ++refreshSequence;
+    latestQuotes[symbol] = Number(order.price);
+    displayedPositions = displayedPositions.filter(p => p.symbol !== symbol);
+    message('sellMessage', `${name} ${order.filled_quantity}주 PAPER 매도 완료 · ${money(order.total_amount)}. 오늘 이 종목은 자동 재매수하지 않습니다.`);
+    try { await refresh({ quotes: false }); }
+    catch { message('sellMessage', 'PAPER 매도는 완료되었습니다. 잔고 갱신에 실패했으니 새로고침해 주세요.', true); }
+  } catch (error) {
+    const detail = error.status === 404
+      ? '실행 중인 서버에 매도 기능이 반영되지 않았습니다. 서버 업데이트가 필요합니다.'
+      : `${error.message} 잔고·매매 내역을 확인해 주세요.`;
+    message('sellMessage', detail, true);
+    try { await refresh(); } catch { /* Preserve the original error. */ }
+  } finally {
+    pendingSells.delete(symbol);
+    renderPositions();
+  }
+});
 
 function renderOrderHistory(orders) {
   latestOrderHistory = orders;
-  const automaticOrders = orders.filter(isAutomaticOrder).slice().reverse();
-  if (!automaticOrders.length) {
-    $('orders').innerHTML = '<p class="subtle">아직 자동매매 내역이 없습니다. 매수·매도 체결 시 이곳에 표시됩니다.</p>';
+  const historyOrders = orders.slice().reverse();
+  if (!historyOrders.length) {
+    $('orders').innerHTML = '<p class="subtle">아직 매매 내역이 없습니다. 자동매매와 직접 매도 내역이 이곳에 표시됩니다.</p>';
     return;
   }
-  const rows = automaticOrders.map(order => {
+  const rows = historyOrders.map(order => {
     const name = order.symbol_name || orderStockNames.get(order.symbol) || '종목명 확인 중';
     const date = new Date(order.created_at);
     const time = Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false });
     const quantity = Number(order.filled_quantity ?? order.quantity);
     const amount = order.total_amount ?? Number(order.price) * quantity;
     const buy = order.side === 'BUY';
-    const status = { FILLED: '체결 완료', REJECTED: '주문 거절' }[order.status] || order.status;
+    const status = `${isAutomaticOrder(order) ? '자동' : '수동'} · ${{ FILLED: '체결 완료', REJECTED: '주문 거절' }[order.status] || order.status}`;
     return `<tr><td>${escapeText(time)}</td><td><strong class="trade-stock-name">${escapeText(name)}</strong><small>${escapeText(order.symbol)}</small></td><td><span class="trade-side ${buy ? 'trade-buy' : 'trade-sell'}">${buy ? '매수' : '매도'}</span></td><td class="numeric">${quantity.toLocaleString('ko-KR', { maximumFractionDigits: 8 })}주</td><td class="numeric">${money(order.price)}</td><td class="numeric"><strong>${money(amount)}</strong></td><td>${escapeText(status)}</td></tr>`;
   }).join('');
   $('orders').innerHTML = `<table><thead><tr><th scope="col">체결 시각</th><th scope="col">종목명</th><th scope="col">구분</th><th scope="col" class="numeric">체결 수량</th><th scope="col" class="numeric">체결 단가</th><th scope="col" class="numeric">거래금액</th><th scope="col">상태</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -158,7 +250,7 @@ function renderOrderHistory(orders) {
 function resolveOrderNames(orders, strategy) {
   if (strategy.symbol_name) orderStockNames.set(strategy.symbol, strategy.symbol_name);
   orders.forEach(order => { if (order.symbol_name) orderStockNames.set(order.symbol, order.symbol_name); });
-  const symbols = [...new Set(orders.filter(isAutomaticOrder).map(order => order.symbol))];
+  const symbols = [...new Set(orders.map(order => order.symbol))];
   symbols.forEach(async symbol => {
     if (orderStockNames.has(symbol) || orderNamesPending.has(symbol) || Date.now() < (orderNameRetryAt.get(symbol) || 0)) return;
     orderNamesPending.add(symbol);
@@ -168,6 +260,7 @@ function resolveOrderNames(orders, strategy) {
       if (stock?.name) {
         orderStockNames.set(symbol, stock.name);
         renderOrderHistory(latestOrderHistory);
+        renderPositions();
       }
     } catch { /* Keep the trade visible even when stock-name lookup is unavailable. */ }
     finally { orderNamesPending.delete(symbol); orderNameRetryAt.set(symbol, Date.now() + 60000); }
@@ -176,31 +269,38 @@ function resolveOrderNames(orders, strategy) {
 
 function render(account, orders, strategy) {
   currentStrategyStatus = strategy;
+  displayedPositions = account.positions.filter(p => Number(p.quantity) > 0);
   $('cash').textContent = money(account.cash);
-  $('positionCount').textContent = account.positions.length;
+  $('positionCount').textContent = displayedPositions.length;
   $('orderCount').textContent = orders.length;
   syncStrategyControls();
-  $('strategyState').textContent = strategy.running ? (strategy.symbol === 'AUTO' ? '시장 스캔 중' : `${strategy.symbol} 실행 중`) : '중지';
+  $('strategyState').textContent = strategy.running ? '분산매매 실행 중' : '중지';
   if (!pendingStrategyAction) {
     if (strategy.last_error) message('strategyMessage', strategy.last_error, true);
     else if (strategy.running) {
-      const signals = { BUY_VOLUME_MOMENTUM: '상승률·거래량 신호로 매수', SELL_MOMENTUM_FADE: '상승·거래량 신호 약화로 매도', SELL_STOP_LOSS: '손절 기준 도달로 매도', BUDGET_LIMIT: '잔여 한도 부족 · 매수 대기', HOLD_MOMENTUM: '상승·거래량 신호 유지 · 보유', NO_SIGNAL: '조건을 만족하는 종목 탐색 중' };
+      const signals = { BUY_VOLUME_MOMENTUM: '상승률·거래량 신호로 1차 분할 매수', ADD_VOLUME_MOMENTUM: '신호 유지로 분할 추가 매수', WAIT_TRANCHE: '다음 분할 매수 대기 (15분 간격)', TRANCHE_LIMIT: '오늘 예정된 4회 분할 매수 완료', SELL_MOMENTUM_FADE: '상승·거래량 신호 약화로 매도', SELL_STOP_LOSS: '손절 기준 도달로 매도', BUDGET_LIMIT: '분할 매수 금액으로 1주 매수 불가', HOLD_MOMENTUM: '상승·거래량 신호 유지 · 보유', NO_SIGNAL: '조건을 만족하는 종목 탐색 중' };
+      signals.SELL_MANUAL = '직접 매도 완료 · 오늘 해당 종목 재매수 제외';
+      signals.SELL_TAKE_PROFIT = '수익 +10% 기준 도달로 전량 익절';
+      signals.BUY_DIVERSIFIED = '여러 종목 분산 매수 완료';
       const progress = signals[strategy.last_signal] || '시장 랭킹 분석 중';
-      message('strategyMessage', `${strategy.symbol_name || strategy.symbol} PAPER 자동매매 · ${progress} · 오늘 사용 ${money(account.daily_auto_buy_used ?? 0)} / 잔여 ${money(account.daily_auto_buy_remaining ?? 0)}`);
+      message('strategyMessage', `${strategy.symbol_name || strategy.symbol} PAPER 자동매매 · ${progress} · 분할 ${strategy.buy_tranches_used ?? 0}/${strategy.max_buy_tranches ?? 4}회 · 오늘 사용 ${money(account.daily_auto_buy_used ?? 0)} / 잔여 ${money(account.daily_auto_buy_remaining ?? 0)}`);
     } else message('strategyMessage', '자동매매가 중지되어 있습니다. 시작 버튼을 누르면 시세 분석과 자동 주문을 시작합니다.');
   }
-  if (strategyHelp) strategyHelp.textContent = `국내 전체 시장 거래량 상위권과 당일 상승률 1% 이상 종목이 겹칠 때 점수화합니다. ${strategy.poll_interval_seconds || 60}초마다 확인하며, 매수 한도는 하루 시작 시 가용금액의 40%이고 손실 3% 또는 상승·거래량 신호 이탈 시 매도합니다.`;
-  $('positions').innerHTML = account.positions.length
-    ? `<table><tr><th>종목</th><th>수량</th><th>현재가</th><th>평가손익</th></tr>${account.positions.map(p => { const current = latestQuotes[p.symbol] || Number(p.average_price); const pnl = (current - Number(p.average_price)) * Number(p.quantity); return `<tr><td>${p.symbol}</td><td>${p.quantity}</td><td>${money(current)}</td><td class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</td></tr>`; }).join('')}</table>`
-    : '없음';
+  if (strategyHelp) strategyHelp.textContent = `하루 한도를 최대 5종목에 분산하고 4회, 최소 15분 간격으로 매수합니다. 종목당 하루 최대 20%, 회차당 최대 5%이며 조건·금액에 맞는 종목이 부족하면 현금으로 남깁니다. 모든 보유 종목에 -3% 손절·+10% 익절·조건 이탈 매도를 적용합니다. 설정 한도: ${account.auto_buy_budget_percent ?? 40}%.`;
   resolveOrderNames(orders, strategy);
+  renderPositions();
   renderOrderHistory(orders);
   const positionValue = account.positions.reduce((total, position) => total + Number(position.quantity) * (latestQuotes[position.symbol] || Number(position.average_price)), 0);
   const totalValue = Number(account.cash) + positionValue;
   const pnl = totalValue - Number(account.initial_cash);
   const recommendedAmount = Number(account.daily_auto_buy_limit ?? 0);
   const returnRate = Number(account.initial_cash) > 0 ? pnl / Number(account.initial_cash) * 100 : 0;
-  $('accountSummary').innerHTML = `<div class="metrics"><div><span>가용계좌 금액</span><strong>${money(account.cash)}</strong></div><div title="하루 첫 자동매매 시작 시 가용금액의 40%로 확정되는 일일 매수 한도"><span>하루 추천 사용금액(40%)</span><strong>${money(recommendedAmount)}</strong></div><div><span>평가손익</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</strong></div><div><span>수익률</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${returnRate.toFixed(2)}%</strong></div></div>`;
+  if (document.activeElement?.id !== 'autoBudgetPercent') {
+    const budgetPercent = Number(account.auto_buy_budget_percent ?? 40);
+    const draft = autoBudgetPercentDraft ?? budgetPercent;
+    const valuationTime = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    $('accountSummary').innerHTML = `<div class="metrics"><div class="total-assets"><span>나의 전체 자산</span><strong>${money(totalValue)}</strong><small>현금 + 보유주식 평가액 · ${valuationTime} 계산</small></div><div><span>가용계좌 금액</span><strong>${money(account.cash)}</strong></div><div title="설정 비율로 계산한 오늘의 누적 매수 한도"><span>하루 추천 사용금액 (${budgetPercent}%)</span><strong>${money(recommendedAmount)}</strong></div><div><span>평가손익</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</strong></div><div><span>수익률</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${returnRate.toFixed(2)}%</strong></div></div><form id="autoBudgetForm" class="budget-setting"><label for="autoBudgetPercent">하루 자동매매 사용 비율</label><div><input id="autoBudgetPercent" type="number" min="0" max="100" step="1" value="${draft}" aria-label="하루 자동매매 사용 비율(퍼센트)"><span>%</span><button id="saveAutoBudget" type="submit">적용</button></div><small id="autoBudgetStatus" class="budget-status">비율을 바꾸면 오늘 한도에도 바로 반영됩니다.</small></form>`;
+  }
   document.querySelectorAll('#recommendations .recommend-card').forEach(card => {
     const price = Number(card.dataset.price || 0);
     const quantity = price > 0 ? Math.max(0, Math.floor(Number(account.daily_auto_buy_remaining ?? 0) / price)) : 0;
@@ -210,16 +310,24 @@ function render(account, orders, strategy) {
 }
 
 
-async function refresh() {
+async function refresh({ quotes: loadQuotes = true } = {}) {
   const request = ++refreshSequence;
   const command = strategyCommandSequence;
   const [account, orders, strategy] = await Promise.all([api('/api/v1/account'), api('/api/v1/orders'), api('/api/v1/strategies/status')]);
-  await Promise.all(account.positions.map(async (position) => {
+  const symbols = account.positions.filter(position => Number(position.quantity) > 0).map(position => position.symbol);
+  if (loadQuotes && symbols.length) {
     try {
-      const quote = await api(`/api/v1/quotes/${encodeURIComponent(position.symbol)}`);
-      latestQuotes[position.symbol] = Number(quote.price);
-    } catch {}
-  }));
+      const quotes = await api(`/api/v1/quotes-batch/live?symbols=${encodeURIComponent(symbols.join(','))}`);
+      quotes.forEach(quote => { latestQuotes[quote.symbol] = Number(quote.price); });
+    } catch {
+      await Promise.all(account.positions.filter(position => Number(position.quantity) > 0).map(async position => {
+        try {
+          const quote = await api(`/api/v1/quotes/${encodeURIComponent(position.symbol)}`);
+          latestQuotes[position.symbol] = Number(quote.price);
+        } catch {}
+      }));
+    }
+  }
   if (request === refreshSequence && command === strategyCommandSequence) render(account, orders, strategy);
 }
 
@@ -251,7 +359,7 @@ $('quoteLookupForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   await loadLiveQuote();
   if (liveTimer) clearInterval(liveTimer);
-  liveTimer = setInterval(loadLiveQuote, 5000);
+  liveTimer = setInterval(loadLiveQuote, 30000);
 });
 $('lookupSymbol').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('quoteLookupForm').requestSubmit(); } });
 
@@ -287,7 +395,7 @@ document.querySelector('#strategyButton').onclick = async () => {
     if (command === strategyCommandSequence) { pendingStrategyAction = ''; syncStrategyControls(); }
   }
 };
-strategyHelp.textContent = '추천 종목은 참고용입니다. 자동매매는 국내 전체 시장의 상승률·거래량 상위 후보를 분석하며, 하루 매수 한도는 가용금액의 40%입니다.';
+strategyHelp.textContent = '추천 종목은 참고용입니다. 하루 한도를 최대 5종목·4회로 분산하며, 분할 간격은 최소 15분입니다.';
 document.querySelector('#killButton').onclick = async () => {
   if (pendingStrategyAction === 'stop') return;
   const command = ++strategyCommandSequence;
@@ -307,4 +415,4 @@ document.querySelector('#killButton').onclick = async () => {
 };
 setInterval(async () => {
   try { await refresh(); } catch (error) { message('strategyMessage', `상태 확인 실패: ${error.message}`, true); }
-}, 5000);
+}, 30000);

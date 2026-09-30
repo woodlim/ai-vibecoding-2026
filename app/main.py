@@ -1,21 +1,28 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import asyncio
 import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from .models import Account, Candle, Order, OrderRequest, Quote, StrategyStatus, now_utc
+from .models import Account, AutoBudgetRequest, Candle, Order, OrderRequest, PositionSellRequest, Quote, StrategyStatus, now_utc
 from .paper import PaperTrader
 from .toss_client import TossApiError, TossClient
 
 app = FastAPI(title="Toss Auto Trader", version="0.1.0", description="PAPER-only automatic trading API")
 app.mount("/assets", StaticFiles(directory=Path(__file__).resolve().parent.parent / "assets"), name="assets")
-trader = PaperTrader()
+try:
+    INITIAL_AUTO_BUY_BUDGET_PERCENT = Decimal(os.getenv("AUTO_BUY_BUDGET_PERCENT", "40"))
+except (InvalidOperation, ValueError):
+    INITIAL_AUTO_BUY_BUDGET_PERCENT = Decimal("40")
+if not Decimal(0) <= INITIAL_AUTO_BUY_BUDGET_PERCENT <= Decimal(100):
+    INITIAL_AUTO_BUY_BUDGET_PERCENT = Decimal("40")
+trader = PaperTrader(auto_budget_percent=INITIAL_AUTO_BUY_BUDGET_PERCENT)
 toss = TossClient()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 try:
@@ -24,6 +31,16 @@ except ValueError:
     AUTO_TRADE_INTERVAL_SECONDS = 60
 strategy_task: asyncio.Task | None = None
 strategy_command_id = 0
+
+
+@app.exception_handler(OSError)
+async def storage_error_handler(request, exc):
+    return JSONResponse(status_code=503, content={"detail": "계좌 저장에 실패해 처리를 취소했습니다. 저장 공간과 권한을 확인해 주세요."})
+
+
+@app.on_event("startup")
+def load_paper_state() -> None:
+    trader.enable_persistence(Path(__file__).resolve().parent.parent / "data" / "paper-state.json")
 
 
 try:
@@ -80,11 +97,25 @@ async def _auto_trade_loop(initial_candidates: list[dict] | None = None) -> None
             initial_candidates = None
             for candidate in candidates:
                 trader.set_quote(candidate["quote"])
-            position = trader.positions.get(trader.strategy.symbol)
-            if position and position.quantity > 0 and not any(item["quote"].symbol == trader.strategy.symbol for item in candidates):
-                trader.set_quote(await toss.quote(trader.strategy.symbol))
-            trader.run_momentum_strategy(candidates)
-            trader.strategy.last_error = None
+            symbols = [p.symbol for p in trader.account().positions if p.quantity > 0]
+            fresh_symbols = set()
+            failed = []
+            for symbol in symbols:
+                try:
+                    async with asyncio.timeout(20):
+                        quote = await toss.quote(symbol)
+                    if quote.symbol != symbol:
+                        raise TossApiError("조회 시세의 종목이 일치하지 않습니다.")
+                    trader.set_quote(quote)
+                    fresh_symbols.add(symbol)
+                    # Use the same current price for both exits and additional buys.
+                    for item in candidates:
+                        if item["quote"].symbol == symbol:
+                            item["quote"] = trader.quotes[symbol]
+                except (TossApiError, TimeoutError):
+                    failed.append(symbol)
+            trader.run_momentum_strategy(candidates, fresh_symbols=fresh_symbols, allow_buys=not failed)
+            trader.strategy.last_error = f"시세 확인 실패: {', '.join(failed)} · 해당 종목 매도 및 신규 매수 보류" if failed else None
         except (TossApiError, ValueError) as exc:
             trader.strategy.last_error = str(exc)
         except Exception as exc:
@@ -199,6 +230,14 @@ def get_account() -> Account:
     return trader.account()
 
 
+@app.put("/api/v1/settings/auto-budget", response_model=Account)
+def update_auto_budget(request: AutoBudgetRequest) -> Account:
+    try:
+        return trader.set_auto_budget_percent(request.percent)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.get("/api/v1/quotes/{symbol}", response_model=Quote)
 def get_quote(symbol: str) -> Quote:
     quote = trader.quotes.get(symbol)
@@ -255,6 +294,26 @@ def create_order(request: OrderRequest) -> Order:
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.post("/api/v1/positions/{symbol}/sell", response_model=Order, status_code=201)
+async def sell_position(symbol: str, request: PositionSellRequest) -> Order:
+    """PAPER only: use a newly fetched price; never fall back to cached prices."""
+    try:
+        previous = trader.check_position_sell(symbol, request)
+        if previous:
+            return previous
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    try:
+        async with asyncio.timeout(20):
+            quote = await toss.quote(symbol)
+    except (TossApiError, TimeoutError) as exc:
+        raise HTTPException(503, "최신 시세를 가져오지 못해 매도하지 않았습니다. 잠시 후 다시 시도해 주세요.") from exc
+    try:
+        return trader.sell_position(symbol, request, quote)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.get("/api/v1/strategies/status", response_model=StrategyStatus)
 def strategy_status() -> StrategyStatus:
     return trader.strategy
@@ -287,19 +346,8 @@ async def start_strategy(symbol: str | None = None) -> StrategyStatus:
     await _stop_auto_trade_loop(invalidate_pending=False)
     if command_id != strategy_command_id:
         raise HTTPException(409, "자동매매 시작 요청이 취소되었습니다.")
-    if open_positions:
-        active_symbol = open_positions[0].symbol
-        active_quote = trader.quotes.get(active_symbol)
-        active_name = active_quote.name if active_quote else None
-    elif initial_candidates:
-        active_quote = initial_candidates[0]["quote"]
-        active_symbol = active_quote.symbol
-        active_name = active_quote.name
-    else:
-        active_symbol = "AUTO"
-        active_name = "시장 전체 스캔"
-    trader.start_strategy(active_symbol)
-    trader.strategy.symbol_name = active_name
+    trader.start_strategy("AUTO")
+    trader.strategy.symbol_name = "다종목 분산매매"
     trader.strategy.poll_interval_seconds = AUTO_TRADE_INTERVAL_SECONDS
     strategy_task = asyncio.create_task(_auto_trade_loop(initial_candidates))
     return trader.strategy

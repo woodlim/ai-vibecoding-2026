@@ -295,6 +295,12 @@ footer {
 .quote-panel { display: none !important; }
 
 .trade-history-table { overflow-x: auto; }
+#positions { overflow-x: auto; }
+#positions table { min-width: 570px; }
+#positions th, #positions td { white-space: nowrap; }
+.position-sell { height: 32px; padding: 0 10px; font-size: 12px; }
+#sellMessage { font-size: 12px; line-height: 1.6; }
+body.light .position-sell { color: #b52a43; border-color: #d78a9a; }
 .trade-history-table table { width: 100%; min-width: 760px; }
 .trade-history-table th, .trade-history-table td { white-space: nowrap; }
 .trade-history-table .numeric { text-align: right; font-variant-numeric: tabular-nums; }
