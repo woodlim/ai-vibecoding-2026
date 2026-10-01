@@ -51,17 +51,17 @@ def test_momentum_buys_from_daily_budget_then_sells_when_signal_fades():
     trader.set_quote(quote)
     trader.run_momentum_strategy([{"quote": quote, "change_rate": 5, "score": 10}])
     assert trader.orders[0].side == "BUY"
-    assert trader.orders[0].quantity == 1
-    assert trader.account().daily_auto_buy_used == 100
+    assert trader.orders[0].quantity == 4
+    assert trader.account().daily_auto_buy_used == 400
     assert trader.strategy.buy_tranches_used == 1
 
     trader.set_quote(Quote(symbol="A", name="종목 A", price=105))
     trader.run_momentum_strategy([])
     assert trader.orders[-1].side == "SELL"
-    assert trader.orders[-1].quantity == 1
+    assert trader.orders[-1].quantity == 4
     assert trader.orders[-1].symbol_name == "종목 A"
     assert trader.strategy.last_signal == "SELL_MOMENTUM_FADE"
-    assert trader.account().daily_auto_buy_used == 100
+    assert trader.account().daily_auto_buy_used == 400
 
 
 @pytest.mark.parametrize("price,signal", [
@@ -85,18 +85,18 @@ def test_momentum_price_exit_boundaries(price, signal):
         assert len(trader.orders) == 2
         assert trader.orders[-1].side == "SELL"
         assert trader.orders[-1].source == "AUTO"
-        assert trader.orders[-1].quantity == 1
+        assert trader.orders[-1].quantity == 4
         assert trader.orders[-1].price == Decimal(price)
-        assert trader.cash == Decimal(4900) + Decimal(price)
+        assert trader.cash == Decimal(4600) + Decimal(price) * 4
         assert trader.positions["A"].quantity == 0
         # A sale neither restores today's buy budget nor allows same-day reentry.
         trader.run_momentum_strategy(candidates)
         assert len(trader.orders) == 2
-        assert trader.account().daily_auto_buy_used == 100
+        assert trader.account().daily_auto_buy_used == 400
         assert trader.strategy.buy_tranches_used == 1
     else:
         assert len(trader.orders) == 1
-        assert trader.positions["A"].quantity == 1
+        assert trader.positions["A"].quantity == 4
 
 
 def test_take_profit_uses_updated_average_price_and_sells_all_shares():
@@ -107,7 +107,7 @@ def test_take_profit_uses_updated_average_price_and_sells_all_shares():
     quote = trader.set_quote(Quote(symbol="A", price=100))
     trader.run_momentum_strategy([{"quote": quote, "change_rate": 5}])
     trader.set_quote(Quote(symbol="A", price=120))
-    trader.order(OrderRequest(symbol="A", side="BUY", quantity=1), automatic=True)
+    trader.order(OrderRequest(symbol="A", side="BUY", quantity=4), automatic=True)
     assert trader.positions["A"].average_price == 110
     for price in ("120", "121"):
         quote = trader.set_quote(Quote(symbol="A", price=price))
@@ -115,9 +115,9 @@ def test_take_profit_uses_updated_average_price_and_sells_all_shares():
         if price == "120":
             assert len(trader.orders) == 2  # +20% vs first fill, but below +10% vs average.
     assert trader.strategy.last_signal == "SELL_TAKE_PROFIT"
-    assert trader.orders[-1].quantity == 2
+    assert trader.orders[-1].quantity == 8
     assert trader.positions["A"].quantity == 0
-    assert trader.account().daily_auto_buy_used == 220
+    assert trader.account().daily_auto_buy_used == 880
 
 
 def test_stopped_strategy_does_not_take_profit():
@@ -129,7 +129,7 @@ def test_stopped_strategy_does_not_take_profit():
     quote = trader.set_quote(Quote(symbol="A", price=110))
     trader.run_momentum_strategy([{"quote": quote, "change_rate": 5}])
     assert len(trader.orders) == 1
-    assert trader.positions["A"].quantity == 1
+    assert trader.positions["A"].quantity == 4
 
 
 def test_momentum_entries_are_split_and_spaced_by_fifteen_minutes(monkeypatch):
@@ -140,30 +140,29 @@ def test_momentum_entries_are_split_and_spaced_by_fifteen_minutes(monkeypatch):
     monkeypatch.setattr(paper_module, "now_utc", lambda: now[0])
     trader = PaperTrader(Decimal(5000))
     trader.start_strategy("A")
-    candidate = {"quote": Quote(symbol="A", name="종목 A", price=100), "change_rate": 5, "score": 10}
+    pool = [{"quote": Quote(symbol=symbol, price=10), "change_rate": 5, "score": 10} for symbol in "ABCDE"]
 
-    trader.set_quote(candidate["quote"])
-    trader.run_momentum_strategy([candidate])
-    assert trader.orders[0].quantity == 1
-    assert trader.account().daily_auto_buy_used == 100
+    trader.run_momentum_strategy(pool)
+    assert trader.account().daily_auto_buy_used == 430
 
-    trader.run_momentum_strategy([candidate])
+    trader.run_momentum_strategy(pool)
     assert trader.strategy.last_signal == "WAIT_TRANCHE"
-    assert len(trader.orders) == 1
+    assert len(trader.orders) == 5
 
     for _ in range(3):
         now[0] += timedelta(minutes=15)
-        trader.set_quote(candidate["quote"])
-        trader.run_momentum_strategy([candidate])
+        trader.run_momentum_strategy(pool)
 
-    assert len(trader.orders) == 4
-    assert [order.quantity for order in trader.orders] == [1, 1, 1, 1]
-    assert trader.account().daily_auto_buy_used == 400
+    assert len(trader.orders) == 20
+    assert trader.account().daily_auto_buy_used == 1720
     assert trader.strategy.buy_tranches_used == 4
     now[0] += timedelta(minutes=15)
-    trader.run_momentum_strategy([candidate])
-    assert trader.strategy.last_signal == "TRANCHE_LIMIT"
-    assert len(trader.orders) == 4
+    trader.run_momentum_strategy(pool)
+    assert trader.strategy.last_signal == "BUY_TOP_UP"
+    assert trader.account().daily_auto_buy_used == 1750
+    assert trader.strategy.buy_tranches_used == 5
+    trader.run_momentum_strategy(pool)
+    assert trader.strategy.last_signal == "TARGET_REACHED"
 
 
 def test_start_uses_market_rankings_not_recommendations_and_stop_cancels_worker(isolated_server, monkeypatch):

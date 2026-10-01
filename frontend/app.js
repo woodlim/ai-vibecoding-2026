@@ -22,6 +22,7 @@ const fallbackStocks = [{name:'삼성전자',symbol:'005930',market:'KOSPI'},{na
 let selectedRecommendationSymbol = '';
 let selectedRecommendationName = '';
 let currentStrategyStatus = { running: false, symbol: '' };
+let availableRefillSlots = 0;
 let pendingStrategyAction = '';
 let strategyCommandSequence = 0;
 let refreshSequence = 0;
@@ -32,8 +33,8 @@ function syncStrategyControls() {
   if (selected) selected.textContent = '추천 TOP 5는 참고용이며 자동매매 대상은 국내 거래량·등락률 랭킹에서 별도로 찾습니다.';
   if (startButton) {
     const alreadyRunning = currentStrategyStatus.running;
-    startButton.disabled = Boolean(pendingStrategyAction) || alreadyRunning;
-    startButton.textContent = pendingStrategyAction === 'start' ? '시작 준비 중…' : alreadyRunning ? '자동매매 실행 중' : '자동매매 시작';
+    startButton.disabled = Boolean(pendingStrategyAction) || (alreadyRunning && !availableRefillSlots);
+    startButton.textContent = pendingStrategyAction === 'start' ? '후보 확인 중…' : alreadyRunning ? (availableRefillSlots ? `빈자리 ${availableRefillSlots}종목 채우기` : '자동매매 실행 중') : '자동매매 시작';
   }
   if (stopButton) {
     stopButton.disabled = pendingStrategyAction === 'stop';
@@ -242,9 +243,11 @@ function renderOrderHistory(orders) {
     const amount = order.total_amount ?? Number(order.price) * quantity;
     const buy = order.side === 'BUY';
     const status = `${isAutomaticOrder(order) ? '자동' : '수동'} · ${{ FILLED: '체결 완료', REJECTED: '주문 거절' }[order.status] || order.status}`;
-    return `<tr><td>${escapeText(time)}</td><td><strong class="trade-stock-name">${escapeText(name)}</strong><small>${escapeText(order.symbol)}</small></td><td><span class="trade-side ${buy ? 'trade-buy' : 'trade-sell'}">${buy ? '매수' : '매도'}</span></td><td class="numeric">${quantity.toLocaleString('ko-KR', { maximumFractionDigits: 8 })}주</td><td class="numeric">${money(order.price)}</td><td class="numeric"><strong>${money(amount)}</strong></td><td>${escapeText(status)}</td></tr>`;
+    const realized = Number(order.realized_pnl ?? 0);
+    const result = buy ? '-' : `<strong class="${realized >= 0 ? 'positive' : 'negative'}">${realized >= 0 ? '+' : ''}${money(realized)}<small>${Number(order.realized_pnl_rate ?? 0).toFixed(2)}%</small></strong>`;
+    return `<tr><td>${escapeText(time)}</td><td><strong class="trade-stock-name">${escapeText(name)}</strong><small>${escapeText(order.symbol)}</small></td><td><span class="trade-side ${buy ? 'trade-buy' : 'trade-sell'}">${buy ? '매수' : '매도'}</span></td><td class="numeric">${quantity.toLocaleString('ko-KR', { maximumFractionDigits: 8 })}주</td><td class="numeric">${money(order.price)}</td><td class="numeric"><strong>${money(amount)}</strong></td><td class="numeric trade-realized">${result}</td><td>${escapeText(status)}</td></tr>`;
   }).join('');
-  $('orders').innerHTML = `<table><thead><tr><th scope="col">체결 시각</th><th scope="col">종목명</th><th scope="col">구분</th><th scope="col" class="numeric">체결 수량</th><th scope="col" class="numeric">체결 단가</th><th scope="col" class="numeric">거래금액</th><th scope="col">상태</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('orders').innerHTML = `<table><thead><tr><th scope="col">체결 시각</th><th scope="col">종목명</th><th scope="col">구분</th><th scope="col" class="numeric">체결 수량</th><th scope="col" class="numeric">체결 단가</th><th scope="col" class="numeric">거래금액</th><th scope="col" class="numeric">실현손익</th><th scope="col">상태</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function resolveOrderNames(orders, strategy) {
@@ -269,6 +272,7 @@ function resolveOrderNames(orders, strategy) {
 
 function render(account, orders, strategy) {
   currentStrategyStatus = strategy;
+  availableRefillSlots = Number(account.refill_slots ?? 0);
   displayedPositions = account.positions.filter(p => Number(p.quantity) > 0);
   $('cash').textContent = money(account.cash);
   $('positionCount').textContent = displayedPositions.length;
@@ -282,24 +286,30 @@ function render(account, orders, strategy) {
       signals.SELL_MANUAL = '직접 매도 완료 · 오늘 해당 종목 재매수 제외';
       signals.SELL_TAKE_PROFIT = '수익 +10% 기준 도달로 전량 익절';
       signals.BUY_DIVERSIFIED = '여러 종목 분산 매수 완료';
+      signals.BUY_TOP_UP = '목표 금액까지 추가 분할 매수';
+      signals.BUY_REPLACEMENT = '수동 매도한 빈자리에 새 종목 매수';
+      signals.TARGET_REACHED = '오늘 매수 목표 금액 도달';
+      signals.BUDGET_LIMIT = '목표 잔액·종목별 한도 안에서 매수 가능한 종목 대기';
       const progress = signals[strategy.last_signal] || '시장 랭킹 분석 중';
-      message('strategyMessage', `${strategy.symbol_name || strategy.symbol} PAPER 자동매매 · ${progress} · 분할 ${strategy.buy_tranches_used ?? 0}/${strategy.max_buy_tranches ?? 4}회 · 오늘 사용 ${money(account.daily_auto_buy_used ?? 0)} / 잔여 ${money(account.daily_auto_buy_remaining ?? 0)}`);
+      message('strategyMessage', `${strategy.symbol_name || strategy.symbol} PAPER 자동매매 · ${progress} · 분할 ${strategy.buy_tranches_used ?? 0}회 · 순사용 ${money(account.daily_auto_buy_net_used ?? account.daily_auto_buy_used ?? 0)} / 목표 ${money(account.daily_auto_buy_target ?? 0)} · 매수 여유 ${money(account.daily_auto_buy_target_remaining ?? 0)}${availableRefillSlots ? ` · 빈자리 ${availableRefillSlots}종목` : ''}`);
     } else message('strategyMessage', '자동매매가 중지되어 있습니다. 시작 버튼을 누르면 시세 분석과 자동 주문을 시작합니다.');
   }
-  if (strategyHelp) strategyHelp.textContent = `하루 한도를 최대 5종목에 분산하고 4회, 최소 15분 간격으로 매수합니다. 종목당 하루 최대 20%, 회차당 최대 5%이며 조건·금액에 맞는 종목이 부족하면 현금으로 남깁니다. 모든 보유 종목에 -3% 손절·+10% 익절·조건 이탈 매도를 적용합니다. 설정 한도: ${account.auto_buy_budget_percent ?? 40}%.`;
+  if (strategyHelp) strategyHelp.textContent = `설정 한도의 87.5%를 목표로 최대 5종목에 분산합니다. 수동 매도 시 회수한 자동매수 원금은 다시 사용할 수 있으며, 빈자리는 15분 대기 없이 새 후보로 보충합니다. 보충 1회에도 목표의 최대 25%, 종목당 설정 한도의 최대 20%를 사용합니다. 일반 추가 매수는 15분 간격입니다. -3% 손절·+10% 익절·조건 이탈 매도를 적용합니다.`;
   resolveOrderNames(orders, strategy);
   renderPositions();
   renderOrderHistory(orders);
   const positionValue = account.positions.reduce((total, position) => total + Number(position.quantity) * (latestQuotes[position.symbol] || Number(position.average_price)), 0);
   const totalValue = Number(account.cash) + positionValue;
   const pnl = totalValue - Number(account.initial_cash);
+  const realizedPnl = Number(account.realized_pnl ?? 0);
+  const realizedRate = Number(account.realized_return_rate ?? 0);
   const recommendedAmount = Number(account.daily_auto_buy_limit ?? 0);
   const returnRate = Number(account.initial_cash) > 0 ? pnl / Number(account.initial_cash) * 100 : 0;
   if (document.activeElement?.id !== 'autoBudgetPercent') {
     const budgetPercent = Number(account.auto_buy_budget_percent ?? 40);
     const draft = autoBudgetPercentDraft ?? budgetPercent;
     const valuationTime = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    $('accountSummary').innerHTML = `<div class="metrics"><div class="total-assets"><span>나의 전체 자산</span><strong>${money(totalValue)}</strong><small>현금 + 보유주식 평가액 · ${valuationTime} 계산</small></div><div><span>가용계좌 금액</span><strong>${money(account.cash)}</strong></div><div title="설정 비율로 계산한 오늘의 누적 매수 한도"><span>하루 추천 사용금액 (${budgetPercent}%)</span><strong>${money(recommendedAmount)}</strong></div><div><span>평가손익</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</strong></div><div><span>수익률</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${returnRate.toFixed(2)}%</strong></div></div><form id="autoBudgetForm" class="budget-setting"><label for="autoBudgetPercent">하루 자동매매 사용 비율</label><div><input id="autoBudgetPercent" type="number" min="0" max="100" step="1" value="${draft}" aria-label="하루 자동매매 사용 비율(퍼센트)"><span>%</span><button id="saveAutoBudget" type="submit">적용</button></div><small id="autoBudgetStatus" class="budget-status">비율을 바꾸면 오늘 한도에도 바로 반영됩니다.</small></form>`;
+    $('accountSummary').innerHTML = `<div class="metrics"><div class="total-assets"><span>나의 전체 자산</span><strong>${money(totalValue)}</strong><small>현금 + 보유주식 평가액 · ${valuationTime} 계산</small></div><div><span>가용계좌 금액</span><strong>${money(account.cash)}</strong></div><div title="설정 비율로 계산한 오늘의 누적 매수 한도"><span>하루 매수 한도 (${budgetPercent}%)</span><strong>${money(recommendedAmount)}</strong><small class="buy-target">분할 매수 목표 ${money(account.daily_auto_buy_target ?? recommendedAmount * 0.875)} (${Number((budgetPercent * 0.875).toFixed(3))}%)</small></div><div><span>평가손익</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</strong></div><div><span>수익률</span><strong class="${pnl >= 0 ? 'positive' : 'negative'}">${returnRate.toFixed(2)}%</strong></div><div title="매도 체결이 완료된 거래의 손익 합계"><span>누적 실현손익</span><strong class="${realizedPnl >= 0 ? 'positive' : 'negative'}">${realizedPnl >= 0 ? '+' : ''}${money(realizedPnl)}</strong><small>${realizedRate.toFixed(2)}%</small></div></div><form id="autoBudgetForm" class="budget-setting"><label for="autoBudgetPercent">하루 자동매매 사용 비율</label><div><input id="autoBudgetPercent" type="number" min="0" max="100" step="1" value="${draft}" aria-label="하루 자동매매 사용 비율(퍼센트)"><span>%</span><button id="saveAutoBudget" type="submit">적용</button></div><small id="autoBudgetStatus" class="budget-status">비율을 바꾸면 오늘 한도와 매수 목표에도 바로 반영됩니다.</small></form>`;
   }
   document.querySelectorAll('#recommendations .recommend-card').forEach(card => {
     const price = Number(card.dataset.price || 0);
@@ -395,7 +405,7 @@ document.querySelector('#strategyButton').onclick = async () => {
     if (command === strategyCommandSequence) { pendingStrategyAction = ''; syncStrategyControls(); }
   }
 };
-strategyHelp.textContent = '추천 종목은 참고용입니다. 하루 한도를 최대 5종목·4회로 분산하며, 분할 간격은 최소 15분입니다.';
+strategyHelp.textContent = '설정 한도의 87.5%를 목표로 최대 5종목에 분산 매수하며, 분할 간격은 최소 15분입니다.';
 document.querySelector('#killButton').onclick = async () => {
   if (pendingStrategyAction === 'stop') return;
   const command = ++strategyCommandSequence;

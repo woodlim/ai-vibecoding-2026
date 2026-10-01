@@ -15,6 +15,7 @@ class PaperTrader:
     """V0.1 가상계좌. 실제 브로커 API를 호출하지 않는다."""
 
     AUTO_BUY_TRANCHES = 4
+    AUTO_BUY_TARGET_RATIO = Decimal("0.875")
     MAX_POSITIONS = 5
     AUTO_BUY_TRANCHE_COOLDOWN = timedelta(minutes=15)
 
@@ -63,6 +64,7 @@ class PaperTrader:
             self.auto_budget_percent = state.auto_budget_percent
             self.positions = {p.symbol: p.model_copy(deep=True) for p in state.positions}
             self.orders = [o.model_copy(deep=True) for o in state.orders]
+            self._backfill_realized_pnl()
             self.client_orders = {o.client_order_id: o for o in self.orders}
             self.quotes = {q.symbol: q.model_copy(deep=True) for q in state.quotes}
             self.strategy = state.strategy.model_copy(deep=True)
@@ -71,6 +73,29 @@ class PaperTrader:
             self._auto_buy_tranches_used, self._last_auto_buy_at = state.buy_rounds, state.last_buy_at
             self._blocked_symbols = set(state.blocked_symbols)
             self._symbol_buy_used = defaultdict(Decimal, state.symbol_buy_used)
+
+    def _backfill_realized_pnl(self) -> None:
+        """Fill P/L for snapshots created before sell P/L fields existed."""
+        quantities: dict[str, Decimal] = defaultdict(Decimal)
+        cost: dict[str, Decimal] = defaultdict(Decimal)
+        for index, order in enumerate(self.orders):
+            quantity = order.filled_quantity or order.quantity
+            amount = order.price * quantity
+            if order.side == "BUY":
+                quantities[order.symbol] += quantity
+                cost[order.symbol] += amount
+                continue
+            if order.side != "SELL":
+                continue
+            average = cost[order.symbol] / quantities[order.symbol] if quantities[order.symbol] else Decimal(0)
+            basis = order.cost_basis if order.cost_basis else average * quantity
+            pnl = order.realized_pnl if order.cost_basis else amount - basis
+            rate = order.realized_pnl_rate if order.cost_basis else (pnl / basis * Decimal(100) if basis else Decimal(0))
+            self.orders[index] = order.model_copy(update={
+                "realized_pnl": pnl, "realized_pnl_rate": rate, "cost_basis": basis,
+            })
+            quantities[order.symbol] = max(Decimal(0), quantities[order.symbol] - quantity)
+            cost[order.symbol] = max(Decimal(0), cost[order.symbol] - basis)
 
     def enable_persistence(self, path: Path) -> None:
         with self._lock:
@@ -87,7 +112,7 @@ class PaperTrader:
 
     def _ensure_daily_budget(self) -> None:
         # Freeze the limit at the first start/tick of each Korean calendar day.
-        # Stopping, switching stocks, and selling never replenish this limit.
+        # Manual sales can release used principal, but never increase this limit.
         today = self._today()
         if self._budget_date != today:
             self._budget_date = today
@@ -121,19 +146,63 @@ class PaperTrader:
             del prices[:-50]
             return quote
 
+    def _manual_replacement_info(self) -> tuple[Decimal, int]:
+        """Replay fills so old snapshots and duplicate requests share one credit ledger.
+
+        Only today's automatic-buy principal is released by manual sales. Gains
+        do not add credit, losses reduce it, and automatic sales add no credit.
+        """
+        today = self._today()
+        quantities: dict[str, Decimal] = defaultdict(Decimal)
+        automatic_cost: dict[str, Decimal] = defaultdict(Decimal)
+        released = Decimal(0)
+        slots = 0
+        for order in self.orders:
+            if order.status != "FILLED" or order.filled_quantity <= 0:
+                continue
+            symbol, quantity = order.symbol, order.filled_quantity
+            today_order = order.created_at.astimezone(timezone(timedelta(hours=9))).date() == today
+            if order.side == "BUY":
+                if today_order and order.source == "AUTO":
+                    automatic_cost[symbol] += order.price * quantity
+                    if quantities[symbol] == 0 and slots:
+                        slots -= 1
+                quantities[symbol] += quantity
+            elif quantities[symbol] >= quantity:
+                removed_cost = automatic_cost[symbol] * quantity / quantities[symbol]
+                automatic_cost[symbol] -= removed_cost
+                quantities[symbol] -= quantity
+                if today_order and order.source == "MANUAL":
+                    released += min(removed_cost, order.price * quantity)
+                    if quantities[symbol] == 0:
+                        slots += 1
+        held_count = sum(p.quantity > 0 for p in self.positions.values())
+        return released, min(slots, max(0, self.MAX_POSITIONS - held_count))
+
     def account(self) -> Account:
         with self._lock:
             today = self._today()
             # Viewing the account previews the budget; only trading fixes it.
             limit = self._daily_limit if self._budget_date == today else max(Decimal(0), self.cash) * self.auto_budget_percent / Decimal(100)
             used = self._daily_used if self._budget_date == today else Decimal(0)
+            target = limit * self.AUTO_BUY_TARGET_RATIO
+            credit, refill_slots = self._manual_replacement_info()
+            net_used = max(Decimal(0), used - credit)
+            held_cost = sum((p.quantity * p.average_price for p in self.positions.values()), Decimal(0))
+            realized_pnl = sum((order.realized_pnl for order in self.orders if order.side == "SELL" and order.status == "FILLED"), Decimal(0))
+            realized_cost_basis = sum((order.cost_basis for order in self.orders if order.side == "SELL" and order.status == "FILLED"), Decimal(0))
             return Account(
                 cash=self.cash, initial_cash=self.initial_cash,
                 positions=[position.model_copy() for position in self.positions.values()],
                 daily_budget_date=today, daily_auto_buy_limit=limit,
                 daily_auto_buy_used=used,
-                daily_auto_buy_remaining=max(Decimal(0), min(self.cash, limit - used)),
+                daily_auto_buy_remaining=max(Decimal(0), min(self.cash, limit - net_used, limit - held_cost)),
+                daily_auto_buy_target=target,
+                daily_auto_buy_target_remaining=max(Decimal(0), min(self.cash, target - net_used, target - held_cost)),
                 auto_buy_budget_percent=self.auto_budget_percent,
+                daily_manual_sell_credit=credit, daily_auto_buy_net_used=net_used, refill_slots=refill_slots,
+                realized_pnl=realized_pnl,
+                realized_cost_basis=realized_cost_basis,
             )
 
     @persisted
@@ -221,9 +290,13 @@ class PaperTrader:
             raise ValueError("insufficient paper position")
         if automatic and request.side == "BUY":
             self._ensure_daily_budget()
-            if amount > self._daily_limit - self._daily_used:
+            released, _ = self._manual_replacement_info()
+            if amount > self._daily_limit - max(Decimal(0), self._daily_used - released):
                 raise ValueError(f"하루 자동매매 사용 한도({self.auto_budget_percent}%)를 초과했습니다.")
 
+        realized_pnl = Decimal(0)
+        realized_pnl_rate = Decimal(0)
+        cost_basis = Decimal(0)
         if request.side == "BUY":
             total = position.average_price * position.quantity + amount
             position.quantity += request.quantity
@@ -233,6 +306,9 @@ class PaperTrader:
                 self._daily_used += amount
                 self._symbol_buy_used[request.symbol] += amount
         else:
+            cost_basis = position.average_price * request.quantity
+            realized_pnl = amount - cost_basis
+            realized_pnl_rate = realized_pnl / cost_basis * Decimal(100) if cost_basis else Decimal(0)
             position.quantity -= request.quantity
             self.cash += amount
             if position.quantity == 0:
@@ -245,7 +321,9 @@ class PaperTrader:
         result = Order(order_id=str(uuid4()), client_order_id=key, symbol=request.symbol, side=request.side,
                        quantity=request.quantity, filled_quantity=request.quantity, price=execution_price,
                        status="FILLED", created_at=now_utc(), symbol_name=name,
-                       source="AUTO" if automatic else "MANUAL")
+                       source="AUTO" if automatic else "MANUAL",
+                       realized_pnl=realized_pnl, realized_pnl_rate=realized_pnl_rate,
+                       cost_basis=cost_basis)
         self.orders.append(result)
         self.client_orders[key] = result
         return result
@@ -308,47 +386,80 @@ class PaperTrader:
             return self.strategy
 
     def _buy_momentum_round(self, candidates: list[dict]) -> None:
-        if self._auto_buy_tranches_used >= self.AUTO_BUY_TRANCHES:
-            self.strategy.last_signal = "TRANCHE_LIMIT"
+        target = self._daily_limit * self.AUTO_BUY_TARGET_RATIO
+        account = self.account()
+        replacing = account.refill_slots > 0
+        if account.daily_auto_buy_net_used >= target:
+            self.strategy.last_signal = "TARGET_REACHED"
             return
         now = now_utc()
-        if self._last_auto_buy_at and now < self._last_auto_buy_at + self.AUTO_BUY_TRANCHE_COOLDOWN:
+        if not replacing and self._last_auto_buy_at and now < self._last_auto_buy_at + self.AUTO_BUY_TRANCHE_COOLDOWN:
             self.strategy.last_signal = "WAIT_TRANCHE"
             return
-        # Unused allocations stay in cash; fewer candidates never concentrate the round.
+        # Four base rounds, followed by spaced top-ups if integer shares or prior
+        # candidate shortages left the target underused. Manual sales release principal.
+        round_budget = max(Decimal(0), min(account.daily_auto_buy_target_remaining,
+                                           target / self.AUTO_BUY_TRANCHES))
         per_symbol_limit = self._daily_limit / self.MAX_POSITIONS
-        per_slot = per_symbol_limit / self.AUTO_BUY_TRANCHES
-        bought: set[str] = set()
+        allocations: list[dict] = []
         seen: set[str] = set()
         held = {p.symbol for p in self.positions.values() if p.quantity > 0}
+        originally_held = set(held)
+        slot_limit = account.refill_slots if replacing else self.MAX_POSITIONS
+        remaining = round_budget
         for item in sorted(candidates, key=lambda item: item.get("score", 0), reverse=True):
             quote = item["quote"]
             if quote.symbol in seen:
                 continue
             seen.add(quote.symbol)
-            if len(bought) >= self.MAX_POSITIONS:
+            if len(allocations) >= slot_limit:
                 break
+            if replacing and quote.symbol in originally_held:
+                continue
             if quote.symbol not in held and len(held) >= self.MAX_POSITIONS:
                 continue
             position = self.positions.get(quote.symbol)
             held_cost = position.quantity * position.average_price if position else Decimal(0)
             symbol_room = per_symbol_limit - max(self._symbol_buy_used[quote.symbol], held_cost)
-            available = max(Decimal(0), min(self.cash, self._daily_limit - self._daily_used, per_slot, symbol_room))
-            quantity = available // quote.price
-            if quantity < 1:
+            max_quantity = max(Decimal(0), symbol_room // quote.price)
+            if max_quantity < 1 or quote.price > remaining:
                 continue  # An expensive top-ranked stock must not block cheaper candidates.
+            allocations.append({"quote": quote, "quantity": Decimal(1), "max_quantity": max_quantity})
+            remaining -= quote.price
+            held.add(quote.symbol)
+
+        # Spread each pass equally, then reuse rounding/cap leftovers. Every pass
+        # buys at least one share or exits, and never exceeds the round budget.
+        while True:
+            active = [a for a in allocations if a["quantity"] < a["max_quantity"]
+                      and a["quote"].price <= remaining]
+            if not active:
+                break
+            equal_share = remaining / len(active)
+            allocated = Decimal(0)
+            for allocation in active:
+                price = allocation["quote"].price
+                extra = min(equal_share // price, allocation["max_quantity"] - allocation["quantity"])
+                allocation["quantity"] += extra
+                allocated += price * extra
+            if allocated == 0:
+                allocation = min(active, key=lambda a: a["quantity"] * a["quote"].price)
+                allocation["quantity"] += 1
+                allocated = allocation["quote"].price
+            remaining -= allocated
+
+        for allocation in allocations:
+            quote = allocation["quote"]
             self.set_quote(quote)
             self.order(OrderRequest(
-                symbol=quote.symbol, side="BUY", quantity=quantity,
+                symbol=quote.symbol, side="BUY", quantity=allocation["quantity"],
                 client_order_id=f"momentum-buy-{len(self.orders) + 1}",
             ), automatic=True)
-            bought.add(quote.symbol)
-            held.add(quote.symbol)
-        if bought:
+        if allocations:
             self._auto_buy_tranches_used += 1  # One round can contain several orders.
             self.strategy.buy_tranches_used = self._auto_buy_tranches_used
             self._last_auto_buy_at = now
-            self.strategy.last_signal = "BUY_DIVERSIFIED"
+            self.strategy.last_signal = "BUY_REPLACEMENT" if replacing else ("BUY_TOP_UP" if self._auto_buy_tranches_used > self.AUTO_BUY_TRANCHES else "BUY_DIVERSIFIED")
         else:
             self.strategy.last_signal = "BUDGET_LIMIT"
 

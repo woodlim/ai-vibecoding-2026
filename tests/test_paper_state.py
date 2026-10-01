@@ -33,14 +33,14 @@ def test_manual_sale_and_idempotency_survive_restart(tmp_path):
     trader.start_strategy("AUTO")
     quote = trader.set_quote(Quote(symbol="A", price=100))
     trader.run_momentum_strategy([{"quote": quote, "change_rate": 5}])
-    request = PositionSellRequest(quantity=20, client_order_id="sell")
+    request = PositionSellRequest(quantity=80, client_order_id="sell")
     order = trader.sell_position("A", request, Quote(symbol="A", price=110))
     restored = PaperTrader()
     restored.enable_persistence(path)
     assert restored.check_position_sell("A", request).order_id == order.order_id
-    assert restored.cash == 100200
+    assert restored.cash == 100800
     assert "A" in restored._blocked_symbols
-    assert restored.account().daily_auto_buy_used == 2000
+    assert restored.account().daily_auto_buy_used == 8000
 
 
 def test_save_failure_rolls_back_entire_multi_stock_round(tmp_path, monkeypatch):

@@ -52,6 +52,9 @@ class Order(BaseModel):
     created_at: datetime
     symbol_name: str | None = None
     source: Literal["AUTO", "MANUAL"] = "MANUAL"
+    realized_pnl: Decimal = Decimal("0")
+    realized_pnl_rate: Decimal = Decimal("0")
+    cost_basis: Decimal = Decimal("0")
 
     @computed_field
     @property
@@ -79,7 +82,19 @@ class Account(BaseModel):
     daily_auto_buy_limit: Decimal
     daily_auto_buy_used: Decimal
     daily_auto_buy_remaining: Decimal
+    daily_auto_buy_target: Decimal
+    daily_auto_buy_target_remaining: Decimal
     auto_buy_budget_percent: Decimal
+    daily_manual_sell_credit: Decimal = Decimal("0")
+    daily_auto_buy_net_used: Decimal = Decimal("0")
+    refill_slots: int = 0
+    realized_pnl: Decimal = Decimal("0")
+    realized_cost_basis: Decimal = Decimal("0")
+
+    @computed_field
+    @property
+    def realized_return_rate(self) -> Decimal:
+        return self.realized_pnl / self.realized_cost_basis * Decimal(100) if self.realized_cost_basis else Decimal(0)
 
 
 class AutoBudgetRequest(BaseModel):
@@ -114,7 +129,7 @@ class PaperState(BaseModel):
     budget_basis_cash: Decimal = Field(default=0, ge=0)
     daily_limit: Decimal = Field(default=0, ge=0)
     daily_used: Decimal = Field(default=0, ge=0)
-    buy_rounds: int = Field(default=0, ge=0, le=4)
+    buy_rounds: int = Field(default=0, ge=0)
     last_buy_at: datetime | None = None
     blocked_symbols: list[str] = Field(default_factory=list)
     symbol_buy_used: dict[str, Decimal] = Field(default_factory=dict)

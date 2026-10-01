@@ -324,7 +324,8 @@ def strategy_status() -> StrategyStatus:
 async def start_strategy(symbol: str | None = None) -> StrategyStatus:
     global strategy_task, strategy_command_id
     if trader.strategy.running and strategy_task and not strategy_task.done():
-        return trader.strategy
+        if not trader.account().refill_slots:
+            return trader.strategy
 
     strategy_command_id += 1
     command_id = strategy_command_id

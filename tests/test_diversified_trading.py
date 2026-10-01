@@ -19,31 +19,31 @@ def test_four_rounds_split_five_stocks_and_stay_within_budget(monkeypatch):
     monkeypatch.setattr("app.paper.now_utc", lambda: clock[0])
     trader = PaperTrader(Decimal(100000))
     trader.start_strategy("AUTO")
-    pool = candidates(trader)
+    pool = candidates(trader, price=25)
     for round_number in range(4):
         trader.run_momentum_strategy(pool)
         assert len(trader.orders) == (round_number + 1) * 5
         assert trader.strategy.buy_tranches_used == round_number + 1
-        assert trader.account().daily_auto_buy_used == (round_number + 1) * 10000
+        assert trader.account().daily_auto_buy_used == (round_number + 1) * 8750
         trader.run_momentum_strategy(pool)
         assert len(trader.orders) == (round_number + 1) * 5
         clock[0] += timedelta(minutes=15)
     trader.run_momentum_strategy(pool)
     assert len(trader.orders) == 20
     assert len(trader.strategy.managed_symbols) == 5
-    assert all(p.quantity == 80 for p in trader.positions.values())
-    assert all(amount == 8000 for amount in trader._symbol_buy_used.values())
-    assert trader.cash == 60000
+    assert all(p.quantity == 280 for p in trader.positions.values())
+    assert all(amount == 7000 for amount in trader._symbol_buy_used.values())
+    assert trader.cash == 65000
 
 
 def test_fewer_candidates_leave_cash_and_expensive_top_does_not_block_others():
     trader = PaperTrader(Decimal(100000))
     trader.start_strategy("AUTO")
     expensive = {"quote": Quote(symbol="EXPENSIVE", price=100000), "score": 1000, "change_rate": 5}
-    pool = candidates(trader, "AB")
+    pool = candidates(trader, "AB", price=50)
     trader.run_momentum_strategy([expensive, *pool, pool[0]])
     assert [o.symbol for o in trader.orders] == ["A", "B"]
-    assert trader.account().daily_auto_buy_used == 4000
+    assert trader.account().daily_auto_buy_used == 8750
     assert trader.strategy.buy_tranches_used == 1
 
 
@@ -58,7 +58,7 @@ def test_all_holdings_are_checked_for_stop_loss_profit_and_fade():
     trader.run_momentum_strategy(pool)
     assert {o.symbol for o in trader.orders if o.side == "SELL"} == {"A", "B", "E"}
     assert set(trader.strategy.managed_symbols) == {"C", "D"}
-    assert trader.account().daily_auto_buy_used == 10000
+    assert trader.account().daily_auto_buy_used == 8700
     assert trader.strategy.buy_tranches_used == 1
 
 
@@ -98,7 +98,7 @@ def test_one_failed_quote_does_not_prevent_other_holding_exit(monkeypatch):
             pass
 
     asyncio.run(scenario())
-    assert trader.positions["A"].quantity == 20
+    assert trader.positions["A"].quantity == 44
     assert trader.positions["B"].quantity == 0
     assert "A" in trader.strategy.last_error
     assert len(trader.orders) == 3
