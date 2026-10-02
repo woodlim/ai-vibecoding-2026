@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '../frontend/app.js'), 'utf8');
+const orderHistory = fs.readFileSync(path.join(__dirname, '../frontend/order-history.js'), 'utf8');
 const sellCode = source.slice(source.indexOf('const orderStockNames ='), source.indexOf('function resolveOrderNames('));
 
 function setup({ confirm = true, api, refresh } = {}) {
@@ -20,7 +21,7 @@ function setup({ confirm = true, api, refresh } = {}) {
     api: async (url, options) => { requests.push({ url, ...JSON.parse(options.body) }); return api ? api() : fill; },
     refresh: refresh || (async () => {}),
   });
-  vm.runInContext(sellCode, context);
+  vm.runInContext(orderHistory + sellCode, context);
   vm.runInContext(`displayedPositions = [{symbol:'A',quantity:'2',average_price:'100'}]; orderStockNames.set('A','종목 A'); renderPositions();`, context);
   return {
     elements, requests, context,

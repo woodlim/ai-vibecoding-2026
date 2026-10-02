@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>전체 매매내역 · Toss Auto Trader</title>
+  <link rel="icon" type="image/png" href="/assets/trader-favicon.png">
+  <link rel="stylesheet" href="/styles.css?v=history-buttons-2">
+</head>
+<body class="history-page">
+<main>
+  <header class="topbar"><div><small>TOSS AUTO TRADER</small><h1>전체 매매내역</h1></div><b class="badge">PAPER</b></header>
+  <nav class="history-navigation" aria-label="페이지 이동"><a class="navigation-button navigation-button--back" href="/"><svg class="navigation-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 12H5m6-6-6 6 6 6"/></svg><span>대시보드로 돌아가기</span></a></nav>
+  <article class="card trade-history">
+    <h2>매매 내역 <button id="historyRefreshButton" type="button" class="secondary">새로고침</button></h2>
+    <p class="subtle">전체 매매를 최신순으로 표시하며 30초마다 갱신됩니다. 정산금액과 실현손익은 매수·매도 수수료를 반영합니다. 매도 세금은 제외됩니다.</p>
+    <p id="historyCount" class="subtle">매매내역을 불러오는 중입니다.</p>
+    <p id="historyMessage" class="message" role="status" aria-live="polite"></p>
+    <div id="historyOrders" class="trade-history-table" aria-busy="true"></div>
+  </article>
+  <footer>PAPER 모드 · 전체 가상매매 내역</footer>
+</main>
+<script src="/order-history.js"></script>
+<script src="/trade-history.js"></script>
+</body>
+</html>

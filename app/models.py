@@ -55,11 +55,19 @@ class Order(BaseModel):
     realized_pnl: Decimal = Decimal("0")
     realized_pnl_rate: Decimal = Decimal("0")
     cost_basis: Decimal = Decimal("0")
+    commission: Decimal = Field(default=Decimal(0), ge=0)
+    commission_rate: Decimal = Field(default=Decimal(0), ge=0, le=1)
+    commission_source: Literal["TOSS_ACCOUNT", "KRX_DEFAULT", "LEGACY_ESTIMATE"] = "KRX_DEFAULT"
 
     @computed_field
     @property
     def total_amount(self) -> Decimal:
         return self.price * self.filled_quantity
+
+    @computed_field
+    @property
+    def settlement_amount(self) -> Decimal:
+        return self.total_amount + self.commission if self.side == "BUY" else self.total_amount - self.commission
 
 
 class PositionSellRequest(BaseModel):
@@ -71,6 +79,7 @@ class Position(BaseModel):
     symbol: str
     quantity: Decimal
     average_price: Decimal
+    purchase_commission: Decimal = Field(default=Decimal(0), ge=0)
 
 
 class Account(BaseModel):
@@ -90,6 +99,11 @@ class Account(BaseModel):
     refill_slots: int = 0
     realized_pnl: Decimal = Decimal("0")
     realized_cost_basis: Decimal = Decimal("0")
+    total_commission: Decimal = Decimal("0")
+    commission_rate: Decimal = Decimal("0.00015")
+    commission_source: Literal["TOSS_ACCOUNT", "KRX_DEFAULT"] = "KRX_DEFAULT"
+    commission_error: str | None = None
+    commission_end_date: date | None = None
 
     @computed_field
     @property
@@ -117,7 +131,7 @@ class StrategyStatus(BaseModel):
 
 
 class PaperState(BaseModel):
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 1
     initial_cash: Decimal = Field(ge=0)
     cash: Decimal = Field(ge=0)
     auto_budget_percent: Decimal = Field(ge=0, le=100)
@@ -133,3 +147,6 @@ class PaperState(BaseModel):
     last_buy_at: datetime | None = None
     blocked_symbols: list[str] = Field(default_factory=list)
     symbol_buy_used: dict[str, Decimal] = Field(default_factory=dict)
+    commission_rate: Decimal = Field(default=Decimal("0.00015"), ge=0, le=1)
+    commission_source: Literal["TOSS_ACCOUNT", "KRX_DEFAULT"] = "KRX_DEFAULT"
+    commission_end_date: date | None = None

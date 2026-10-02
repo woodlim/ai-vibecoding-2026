@@ -305,6 +305,8 @@ body.light .position-sell { color: #b52a43; border-color: #d78a9a; }
 .trade-history-table table { width: 100%; min-width: 760px; }
 .trade-history-table th, .trade-history-table td { white-space: nowrap; }
 .trade-history-table .numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.trade-history-table td > small { display: block; margin-top: 4px; font-size: 10px; color: var(--muted); }
+body.light .trade-history-table td > small { color: #806071; }
 .trade-realized strong { display: inline-flex; flex-direction: column; align-items: flex-end; }
 .trade-realized small { margin-top: 3px; font-size: 10px; }
 .trade-stock-name { display: block; margin-bottom: 4px; }
@@ -313,3 +315,35 @@ body.light .position-sell { color: #b52a43; border-color: #d78a9a; }
 .trade-sell { color: #85b7ff; background: #4f9cff18; }
 body.light .trade-buy { color: #b52a43; background: #ffe0e7; }
 body.light .trade-sell { color: #205cb3; background: #e5eeff; }
+.history-actions { display: flex; justify-content: center; padding-top: 22px; margin-bottom: 6px; }
+.navigation-button { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 48px; padding: 12px 20px; border: 1px solid #3d5078; border-radius: 13px; background: #1b2945; color: #e4edff; font: inherit; font-size: 14px; font-weight: 700; line-height: 1.4; text-decoration: none; box-shadow: 0 4px 12px #0000001a; transition: background .18s, border-color .18s, box-shadow .18s, transform .18s; }
+.navigation-button:visited { color: #e4edff; }
+.navigation-button:hover { background: #263959; border-color: #6384bb; transform: translateY(-1px); box-shadow: 0 7px 18px #00000026; }
+.navigation-button:active { transform: translateY(0); }
+.navigation-button:focus-visible { outline: 3px solid #91b0ff; outline-offset: 4px; }
+.navigation-icon { width: 19px; height: 19px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.navigation-button--primary, .navigation-button--primary:visited { min-width: 210px; padding: 13px 24px; background: linear-gradient(135deg, #4978f5, #6359e8); border-color: #7b93ff; color: #fff; box-shadow: 0 6px 20px #4777ff33; }
+.navigation-button--primary:hover { background: linear-gradient(135deg, #5d89ff, #766aef); border-color: #a3b2ff; box-shadow: 0 9px 24px #4777ff4d; }
+.navigation-button--primary .navigation-icon { margin-left: 6px; }
+.history-navigation { margin-bottom: 20px; }
+.history-page .subtle { color: var(--muted); font-size: 13px; line-height: 1.7; }
+.history-page .positive { color: var(--green); }
+.history-page .negative { color: var(--red); }
+.history-page #historyMessage { margin-bottom: 16px; }
+.history-page button:disabled { opacity: .5; cursor: wait; transform: none; }
+body.light .navigation-button, body.light .navigation-button:visited { background: #fff; color: #a53668; border-color: #e8b8cf; box-shadow: 0 4px 12px #d98aa51a; }
+body.light .navigation-button:hover { background: #fff0f6; }
+body.light .navigation-button--primary, body.light .navigation-button--primary:visited { background: linear-gradient(135deg, #d74c83, #ad4dc7); border-color: #d46caf; color: #fff; box-shadow: 0 6px 20px #d74c832b; }
+body.light .navigation-button--primary:hover { background: linear-gradient(135deg, #e15c91, #bd5fd5); border-color: #e89cc7; box-shadow: 0 9px 24px #d74c8340; }
+@media (prefers-reduced-motion: reduce) { .navigation-button { transition: none; } .navigation-button:hover { transform: none; } }
+.history-page.light { color: #30233a; background: #fff5fa; }
+.history-page.light .card { background: #fffaff; border-color: #f1dbe7; box-shadow: 0 12px 30px #d98aa51a; }
+.history-page.light h1, .history-page.light h2 { color: #30233a; }
+.history-page.light .topbar small { color: #d74c83; }
+.history-page.light .badge { background: #fff0f6; border-color: #f3cadd; color: #d74c83; }
+.history-page.light .subtle, .history-page.light th { color: #806071; }
+.history-page.light td { color: #493647; border-bottom-color: #f1dbe7; }
+.history-page.light button.secondary { background: #fff; color: #b23f72; border-color: #e8b8cf; }
+.history-page.light .message { color: #b23f72; }
+.history-page.light .error, .history-page.light .negative { color: #b52a43; }
+.history-page.light .positive { color: #167554; }

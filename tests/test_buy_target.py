@@ -21,6 +21,7 @@ def pool(prices):
 
 def test_ten_million_account_uses_three_point_five_million_in_spaced_rounds(clock):
     trader = PaperTrader(Decimal(10000000))
+    trader.set_commission(Decimal(0), "TOSS_ACCOUNT")
     trader.start_strategy("AUTO")
     quotes = pool([1000] * 5)
     assert trader.account().daily_auto_buy_limit == 4000000
@@ -42,6 +43,7 @@ def test_ten_million_account_uses_three_point_five_million_in_spaced_rounds(cloc
 def test_rounding_leftovers_are_bought_after_four_rounds_and_survive_restart(clock, tmp_path):
     path = tmp_path / "target-state.json"
     trader = PaperTrader(Decimal(10000000))
+    trader.set_commission(Decimal(0), "TOSS_ACCOUNT")
     trader.enable_persistence(path)
     trader.start_strategy("AUTO")
     quotes = pool([10000] * 5)
@@ -63,6 +65,7 @@ def test_rounding_leftovers_are_bought_after_four_rounds_and_survive_restart(clo
 
 def test_new_target_respects_changed_percent_cash_and_existing_usage(clock):
     trader = PaperTrader(Decimal(10000000))
+    trader.set_commission(Decimal(0), "TOSS_ACCOUNT")
     trader.start_strategy("AUTO")
     quotes = pool([1000] * 5)
     trader.run_momentum_strategy(quotes)
@@ -82,6 +85,7 @@ def test_new_target_respects_changed_percent_cash_and_existing_usage(clock):
 
 def test_fewer_candidates_never_break_concentration_limit_to_force_target(clock):
     trader = PaperTrader(Decimal(10000000))
+    trader.set_commission(Decimal(0), "TOSS_ACCOUNT")
     trader.start_strategy("AUTO")
     quotes = pool([1000, 1000])
     for _ in range(6):

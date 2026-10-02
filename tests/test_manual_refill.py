@@ -25,6 +25,7 @@ def pool(symbols):
 
 def filled_account(clock):
     trader = PaperTrader(Decimal(10000000))
+    trader.set_commission(Decimal(0), "TOSS_ACCOUNT")
     trader.start_strategy("AUTO")
     for index in range(4):
         trader.run_momentum_strategy(pool("ABCDE"))

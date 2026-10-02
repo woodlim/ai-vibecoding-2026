@@ -175,7 +175,6 @@ const orderStockNames = new Map();
 const orderNameRetryAt = new Map();
 const orderNamesPending = new Set();
 let latestOrderHistory = [];
-const isAutomaticOrder = order => order.source ? order.source === 'AUTO' : /^sma-(buy|sell)-/.test(order.client_order_id || '');
 const escapeText = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
 const pendingSells = new Set();
 let displayedPositions = [];
@@ -184,7 +183,7 @@ function renderPositions() {
   $('positions').innerHTML = displayedPositions.length
     ? `<table><thead><tr><th>종목</th><th>수량</th><th>현재가</th><th>평가손익</th><th>상태</th><th>매도</th></tr></thead><tbody>${displayedPositions.map(p => {
       const current = latestQuotes[p.symbol] || Number(p.average_price);
-      const pnl = (current - Number(p.average_price)) * Number(p.quantity);
+      const pnl = (current - Number(p.average_price)) * Number(p.quantity) - Number(p.purchase_commission ?? 0);
       const pending = pendingSells.has(p.symbol);
       const name = orderStockNames.get(p.symbol) || p.symbol;
       return `<tr><td><strong class="trade-stock-name">${escapeText(name)}</strong><small>${escapeText(p.symbol)}</small></td><td>${escapeText(p.quantity)}주</td><td>${money(current)}</td><td class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '+' : ''}${money(pnl)}</td><td>${pending ? '매도 중' : '보유 중'}</td><td><button type="button" class="danger position-sell" data-sell-symbol="${escapeText(p.symbol)}" aria-label="${escapeText(name)} 전량 PAPER 매도" ${pending ? 'disabled' : ''}>${pending ? '처리 중…' : '전량 매도'}</button></td></tr>`;
@@ -213,7 +212,7 @@ $('positions').addEventListener('click', async event => {
     ++refreshSequence;
     latestQuotes[symbol] = Number(order.price);
     displayedPositions = displayedPositions.filter(p => p.symbol !== symbol);
-    message('sellMessage', `${name} ${order.filled_quantity}주 PAPER 매도 완료 · ${money(order.total_amount)}. 오늘 이 종목은 자동 재매수하지 않습니다.`);
+    message('sellMessage', `${name} ${order.filled_quantity}주 PAPER 매도 완료 · 수수료 차감 후 ${money(order.settlement_amount ?? order.total_amount)} (수수료 ${money(order.commission ?? 0)}). 오늘 이 종목은 자동 재매수하지 않습니다.`);
     try { await refresh({ quotes: false }); }
     catch { message('sellMessage', 'PAPER 매도는 완료되었습니다. 잔고 갱신에 실패했으니 새로고침해 주세요.', true); }
   } catch (error) {
@@ -230,24 +229,7 @@ $('positions').addEventListener('click', async event => {
 
 function renderOrderHistory(orders) {
   latestOrderHistory = orders;
-  const historyOrders = orders.slice().reverse();
-  if (!historyOrders.length) {
-    $('orders').innerHTML = '<p class="subtle">아직 매매 내역이 없습니다. 자동매매와 직접 매도 내역이 이곳에 표시됩니다.</p>';
-    return;
-  }
-  const rows = historyOrders.map(order => {
-    const name = order.symbol_name || orderStockNames.get(order.symbol) || '종목명 확인 중';
-    const date = new Date(order.created_at);
-    const time = Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false });
-    const quantity = Number(order.filled_quantity ?? order.quantity);
-    const amount = order.total_amount ?? Number(order.price) * quantity;
-    const buy = order.side === 'BUY';
-    const status = `${isAutomaticOrder(order) ? '자동' : '수동'} · ${{ FILLED: '체결 완료', REJECTED: '주문 거절' }[order.status] || order.status}`;
-    const realized = Number(order.realized_pnl ?? 0);
-    const result = buy ? '-' : `<strong class="${realized >= 0 ? 'positive' : 'negative'}">${realized >= 0 ? '+' : ''}${money(realized)}<small>${Number(order.realized_pnl_rate ?? 0).toFixed(2)}%</small></strong>`;
-    return `<tr><td>${escapeText(time)}</td><td><strong class="trade-stock-name">${escapeText(name)}</strong><small>${escapeText(order.symbol)}</small></td><td><span class="trade-side ${buy ? 'trade-buy' : 'trade-sell'}">${buy ? '매수' : '매도'}</span></td><td class="numeric">${quantity.toLocaleString('ko-KR', { maximumFractionDigits: 8 })}주</td><td class="numeric">${money(order.price)}</td><td class="numeric"><strong>${money(amount)}</strong></td><td class="numeric trade-realized">${result}</td><td>${escapeText(status)}</td></tr>`;
-  }).join('');
-  $('orders').innerHTML = `<table><thead><tr><th scope="col">체결 시각</th><th scope="col">종목명</th><th scope="col">구분</th><th scope="col" class="numeric">체결 수량</th><th scope="col" class="numeric">체결 단가</th><th scope="col" class="numeric">거래금액</th><th scope="col" class="numeric">실현손익</th><th scope="col">상태</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('orders').innerHTML = orderHistoryTable(orders, { limit: 10, stockNames: orderStockNames });
 }
 
 function resolveOrderNames(orders, strategy) {
@@ -313,10 +295,29 @@ function render(account, orders, strategy) {
   }
   document.querySelectorAll('#recommendations .recommend-card').forEach(card => {
     const price = Number(card.dataset.price || 0);
-    const quantity = price > 0 ? Math.max(0, Math.floor(Number(account.daily_auto_buy_remaining ?? 0) / price)) : 0;
+    const quantity = price > 0 ? maximumBuyQuantity(price, Number(account.daily_auto_buy_remaining ?? 0), Number(account.commission_rate ?? 0.00015)) : 0;
     const label = card.querySelector('.recommend-quantity');
     if (label) label.textContent = price > 0 ? `최대 ${quantity}주 매수 가능` : '현재가 연결 후 수량 계산';
   });
+  const commissionRate = (Number(account.commission_rate ?? 0.00015) * 100).toLocaleString('ko-KR', { maximumFractionDigits: 5 });
+  const commissionSource = account.commission_source === 'TOSS_ACCOUNT' ? '토스 계좌 조회 요율' : 'KRX 기본 요율 · 계좌 요율 미확인';
+  let feeNote = $('commissionNote');
+  if (!feeNote) {
+    feeNote = document.createElement('p'); feeNote.id = 'commissionNote'; feeNote.className = 'subtle';
+    $('accountSummary').after(feeNote);
+  }
+  feeNote.textContent = `매수·매도 수수료 ${commissionRate}% (${commissionSource}) · 누적 수수료 ${money(account.total_commission ?? 0)}. 자산·손익·수익률에 체결된 수수료 반영 · 매도 세금 제외. 보유주식 평가액에는 향후 매도 수수료를 미리 차감하지 않습니다.`;
+  feeNote.title = account.commission_error ?? '';
+}
+
+function maximumBuyQuantity(price, budget, rate) {
+  let low = 0; let high = Math.max(0, Math.floor(budget / price));
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2);
+    if (price * mid + Math.floor(price * mid * rate) <= budget) low = mid;
+    else high = mid - 1;
+  }
+  return low;
 }
 
 

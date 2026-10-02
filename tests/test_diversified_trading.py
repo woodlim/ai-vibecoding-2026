@@ -70,7 +70,7 @@ def test_existing_large_holding_cannot_receive_more_allocation():
     trader.run_momentum_strategy(pool)
     assert trader.positions["A"].quantity == 90
     assert len(trader.strategy.managed_symbols) == 5
-    assert trader._symbol_buy_used["A"] == 9000
+    assert trader._symbol_buy_used["A"] == 9001
 
 
 def test_one_failed_quote_does_not_prevent_other_holding_exit(monkeypatch):

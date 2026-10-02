@@ -6,7 +6,9 @@ from decimal import Decimal
 from threading import RLock
 from pathlib import Path
 from uuid import uuid4
+from shutil import copy2
 
+from .commissions import KRX_COMMISSION_RATE, commission_for, migrate_commissions
 from .models import Account, Order, OrderRequest, PaperState, Position, PositionSellRequest, Quote, StrategyStatus, now_utc
 from .state import persisted, save_state
 
@@ -46,10 +48,16 @@ class PaperTrader:
         self._symbol_buy_used: dict[str, Decimal] = defaultdict(Decimal)
         self._state_path: Path | None = None
         self._mutation_depth = 0
+        self.commission_rate = KRX_COMMISSION_RATE
+        self.commission_source = "KRX_DEFAULT"
+        self.commission_end_date: date | None = None
+        self.commission_error: str | None = None
 
     def snapshot(self) -> PaperState:
         with self._lock:
             return PaperState(
+                version=2, commission_rate=self.commission_rate,
+                commission_source=self.commission_source, commission_end_date=self.commission_end_date,
                 initial_cash=self.initial_cash, cash=self.cash, auto_budget_percent=self.auto_budget_percent,
                 positions=list(self.positions.values()), orders=self.orders, quotes=list(self.quotes.values()),
                 strategy=self.strategy, budget_date=self._budget_date, budget_basis_cash=self._budget_basis_cash,
@@ -62,6 +70,8 @@ class PaperTrader:
         with self._lock:
             self.initial_cash, self.cash = state.initial_cash, state.cash
             self.auto_budget_percent = state.auto_budget_percent
+            self.commission_rate, self.commission_source = state.commission_rate, state.commission_source
+            self.commission_end_date = state.commission_end_date
             self.positions = {p.symbol: p.model_copy(deep=True) for p in state.positions}
             self.orders = [o.model_copy(deep=True) for o in state.orders]
             self._backfill_realized_pnl()
@@ -79,17 +89,19 @@ class PaperTrader:
         quantities: dict[str, Decimal] = defaultdict(Decimal)
         cost: dict[str, Decimal] = defaultdict(Decimal)
         for index, order in enumerate(self.orders):
+            if order.status != "FILLED":
+                continue
             quantity = order.filled_quantity or order.quantity
             amount = order.price * quantity
             if order.side == "BUY":
                 quantities[order.symbol] += quantity
-                cost[order.symbol] += amount
+                cost[order.symbol] += amount + order.commission
                 continue
             if order.side != "SELL":
                 continue
             average = cost[order.symbol] / quantities[order.symbol] if quantities[order.symbol] else Decimal(0)
             basis = order.cost_basis if order.cost_basis else average * quantity
-            pnl = order.realized_pnl if order.cost_basis else amount - basis
+            pnl = order.realized_pnl if order.cost_basis else amount - order.commission - basis
             rate = order.realized_pnl_rate if order.cost_basis else (pnl / basis * Decimal(100) if basis else Decimal(0))
             self.orders[index] = order.model_copy(update={
                 "realized_pnl": pnl, "realized_pnl_rate": rate, "cost_basis": basis,
@@ -101,10 +113,44 @@ class PaperTrader:
         with self._lock:
             if path.exists():
                 # Invalid snapshots fail startup instead of silently resetting the account.
-                self.restore(PaperState.model_validate_json(path.read_text(encoding="utf-8")))
+                state = PaperState.model_validate_json(path.read_text(encoding="utf-8"))
+                if state.version == 1:
+                    state = migrate_commissions(state)
+                    backup = path.with_name(path.stem + ".pre-commissions.json")
+                    if not backup.exists():
+                        copy2(path, backup)
+                self.restore(state)
             self.strategy.running = False  # Restarts never silently resume trading.
             save_state(path, self.snapshot())
             self._state_path = path
+
+    @persisted
+    def set_commission(self, rate: Decimal, source: str, end_date: date | None = None) -> None:
+        if not rate.is_finite() or not Decimal(0) <= rate <= Decimal(1):
+            raise ValueError("수수료율이 올바르지 않습니다.")
+        if source not in {"TOSS_ACCOUNT", "KRX_DEFAULT"}:
+            raise ValueError("수수료 출처가 올바르지 않습니다.")
+        self.commission_rate, self.commission_source = rate, source
+        self.commission_end_date = end_date
+
+    def _commission(self, amount: Decimal) -> Decimal:
+        expired = self.commission_end_date is not None and self.commission_end_date < self._today()
+        return commission_for(amount, KRX_COMMISSION_RATE if expired else self.commission_rate)
+
+    def _buy_cost(self, price: Decimal, quantity: Decimal) -> Decimal:
+        amount = price * quantity
+        return amount + self._commission(amount)
+
+    def max_buy_quantity(self, price: Decimal, budget: Decimal) -> Decimal:
+        """Find the largest whole-share order affordable including rounded fees."""
+        low, high = 0, int(max(Decimal(0), budget) // price)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if self._buy_cost(price, Decimal(mid)) <= budget:
+                low = mid
+            else:
+                high = mid - 1
+        return Decimal(low)
 
     @staticmethod
     def _today() -> date:
@@ -164,7 +210,7 @@ class PaperTrader:
             today_order = order.created_at.astimezone(timezone(timedelta(hours=9))).date() == today
             if order.side == "BUY":
                 if today_order and order.source == "AUTO":
-                    automatic_cost[symbol] += order.price * quantity
+                    automatic_cost[symbol] += order.settlement_amount
                     if quantities[symbol] == 0 and slots:
                         slots -= 1
                 quantities[symbol] += quantity
@@ -173,7 +219,7 @@ class PaperTrader:
                 automatic_cost[symbol] -= removed_cost
                 quantities[symbol] -= quantity
                 if today_order and order.source == "MANUAL":
-                    released += min(removed_cost, order.price * quantity)
+                    released += min(removed_cost, order.settlement_amount)
                     if quantities[symbol] == 0:
                         slots += 1
         held_count = sum(p.quantity > 0 for p in self.positions.values())
@@ -188,7 +234,7 @@ class PaperTrader:
             target = limit * self.AUTO_BUY_TARGET_RATIO
             credit, refill_slots = self._manual_replacement_info()
             net_used = max(Decimal(0), used - credit)
-            held_cost = sum((p.quantity * p.average_price for p in self.positions.values()), Decimal(0))
+            held_cost = sum((p.quantity * p.average_price + p.purchase_commission for p in self.positions.values()), Decimal(0))
             realized_pnl = sum((order.realized_pnl for order in self.orders if order.side == "SELL" and order.status == "FILLED"), Decimal(0))
             realized_cost_basis = sum((order.cost_basis for order in self.orders if order.side == "SELL" and order.status == "FILLED"), Decimal(0))
             return Account(
@@ -203,6 +249,10 @@ class PaperTrader:
                 daily_manual_sell_credit=credit, daily_auto_buy_net_used=net_used, refill_slots=refill_slots,
                 realized_pnl=realized_pnl,
                 realized_cost_basis=realized_cost_basis,
+                total_commission=sum((o.commission for o in self.orders if o.status == "FILLED"), Decimal(0)),
+                commission_rate=KRX_COMMISSION_RATE if self.commission_end_date and self.commission_end_date < today else self.commission_rate,
+                commission_source="KRX_DEFAULT" if self.commission_end_date and self.commission_end_date < today else self.commission_source,
+                commission_error=self.commission_error, commission_end_date=self.commission_end_date,
             )
 
     @persisted
@@ -283,15 +333,17 @@ class PaperTrader:
             raise ValueError("quote is required before placing an order")
         position = self.positions.get(request.symbol, Position(symbol=request.symbol, quantity=Decimal(0), average_price=Decimal(0)))
         amount = execution_price * request.quantity
+        commission = self._commission(amount)
+        buy_cost = amount + commission
 
-        if request.side == "BUY" and amount > self.cash:
+        if request.side == "BUY" and buy_cost > self.cash:
             raise ValueError("insufficient paper cash")
         if request.side == "SELL" and request.quantity > position.quantity:
             raise ValueError("insufficient paper position")
         if automatic and request.side == "BUY":
             self._ensure_daily_budget()
             released, _ = self._manual_replacement_info()
-            if amount > self._daily_limit - max(Decimal(0), self._daily_used - released):
+            if buy_cost > self._daily_limit - max(Decimal(0), self._daily_used - released):
                 raise ValueError(f"하루 자동매매 사용 한도({self.auto_budget_percent}%)를 초과했습니다.")
 
         realized_pnl = Decimal(0)
@@ -301,18 +353,22 @@ class PaperTrader:
             total = position.average_price * position.quantity + amount
             position.quantity += request.quantity
             position.average_price = total / position.quantity
-            self.cash -= amount
+            position.purchase_commission += commission
+            self.cash -= buy_cost
             if automatic:
-                self._daily_used += amount
-                self._symbol_buy_used[request.symbol] += amount
+                self._daily_used += buy_cost
+                self._symbol_buy_used[request.symbol] += buy_cost
         else:
-            cost_basis = position.average_price * request.quantity
-            realized_pnl = amount - cost_basis
+            allocated_buy_fee = position.purchase_commission * request.quantity / position.quantity
+            cost_basis = position.average_price * request.quantity + allocated_buy_fee
+            realized_pnl = amount - commission - cost_basis
             realized_pnl_rate = realized_pnl / cost_basis * Decimal(100) if cost_basis else Decimal(0)
             position.quantity -= request.quantity
-            self.cash += amount
+            position.purchase_commission -= allocated_buy_fee
+            self.cash += amount - commission
             if position.quantity == 0:
                 position.average_price = Decimal(0)
+                position.purchase_commission = Decimal(0)
         self.positions[request.symbol] = position
 
         name = quote.name if quote else None
@@ -323,7 +379,9 @@ class PaperTrader:
                        status="FILLED", created_at=now_utc(), symbol_name=name,
                        source="AUTO" if automatic else "MANUAL",
                        realized_pnl=realized_pnl, realized_pnl_rate=realized_pnl_rate,
-                       cost_basis=cost_basis)
+                       cost_basis=cost_basis, commission=commission,
+                       commission_rate=KRX_COMMISSION_RATE if self.commission_end_date and self.commission_end_date < self._today() else self.commission_rate,
+                       commission_source="KRX_DEFAULT" if self.commission_end_date and self.commission_end_date < self._today() else self.commission_source)
         self.orders.append(result)
         self.client_orders[key] = result
         return result
@@ -419,33 +477,38 @@ class PaperTrader:
             if quote.symbol not in held and len(held) >= self.MAX_POSITIONS:
                 continue
             position = self.positions.get(quote.symbol)
-            held_cost = position.quantity * position.average_price if position else Decimal(0)
+            held_cost = position.quantity * position.average_price + position.purchase_commission if position else Decimal(0)
             symbol_room = per_symbol_limit - max(self._symbol_buy_used[quote.symbol], held_cost)
-            max_quantity = max(Decimal(0), symbol_room // quote.price)
-            if max_quantity < 1 or quote.price > remaining:
+            max_quantity = self.max_buy_quantity(quote.price, symbol_room)
+            first_cost = self._buy_cost(quote.price, Decimal(1))
+            if max_quantity < 1 or first_cost > remaining:
                 continue  # An expensive top-ranked stock must not block cheaper candidates.
             allocations.append({"quote": quote, "quantity": Decimal(1), "max_quantity": max_quantity})
-            remaining -= quote.price
+            remaining -= first_cost
             held.add(quote.symbol)
 
         # Spread each pass equally, then reuse rounding/cap leftovers. Every pass
         # buys at least one share or exits, and never exceeds the round budget.
         while True:
             active = [a for a in allocations if a["quantity"] < a["max_quantity"]
-                      and a["quote"].price <= remaining]
+                      and self._buy_cost(a["quote"].price, a["quantity"] + 1)
+                      - self._buy_cost(a["quote"].price, a["quantity"]) <= remaining]
             if not active:
                 break
             equal_share = remaining / len(active)
             allocated = Decimal(0)
             for allocation in active:
                 price = allocation["quote"].price
-                extra = min(equal_share // price, allocation["max_quantity"] - allocation["quantity"])
+                before = self._buy_cost(price, allocation["quantity"])
+                extra = min(self.max_buy_quantity(price, before + equal_share) - allocation["quantity"],
+                            allocation["max_quantity"] - allocation["quantity"])
                 allocation["quantity"] += extra
-                allocated += price * extra
+                allocated += self._buy_cost(price, allocation["quantity"]) - before
             if allocated == 0:
                 allocation = min(active, key=lambda a: a["quantity"] * a["quote"].price)
+                before = self._buy_cost(allocation["quote"].price, allocation["quantity"])
                 allocation["quantity"] += 1
-                allocated = allocation["quote"].price
+                allocated = self._buy_cost(allocation["quote"].price, allocation["quantity"]) - before
             remaining -= allocated
 
         for allocation in allocations:
@@ -478,7 +541,7 @@ class PaperTrader:
         position = self.positions.get(symbol)
         if fast > slow and (not position or position.quantity <= 0):
             available = min(self.cash, self._daily_limit - self._daily_used)
-            quantity = available // self.quotes[symbol].price
+            quantity = self.max_buy_quantity(self.quotes[symbol].price, available)
             if quantity < 1:
                 self.strategy.last_signal = "BUDGET_LIMIT"
                 return self.strategy

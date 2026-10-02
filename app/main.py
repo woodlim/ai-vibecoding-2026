@@ -13,6 +13,7 @@ from pathlib import Path
 from .models import Account, AutoBudgetRequest, Candle, Order, OrderRequest, PositionSellRequest, Quote, StrategyStatus, now_utc
 from .paper import PaperTrader
 from .toss_client import TossApiError, TossClient
+from .commissions import KRX_COMMISSION_RATE
 
 app = FastAPI(title="Toss Auto Trader", version="0.1.0", description="PAPER-only automatic trading API")
 app.mount("/assets", StaticFiles(directory=Path(__file__).resolve().parent.parent / "assets"), name="assets")
@@ -39,8 +40,17 @@ async def storage_error_handler(request, exc):
 
 
 @app.on_event("startup")
-def load_paper_state() -> None:
+async def load_paper_state() -> None:
     trader.enable_persistence(Path(__file__).resolve().parent.parent / "data" / "paper-state.json")
+    try:
+        async with asyncio.timeout(15):
+            rate, end_date = await toss.domestic_commission()
+    except (TossApiError, TimeoutError) as exc:
+        trader.set_commission(KRX_COMMISSION_RATE, "KRX_DEFAULT")
+        trader.commission_error = str(exc) or "계좌 수수료 조회 시간이 초과되었습니다."
+    else:
+        trader.set_commission(rate, "TOSS_ACCOUNT", end_date)
+        trader.commission_error = None
 
 
 try:
@@ -150,6 +160,18 @@ def frontend() -> FileResponse:
 @app.get("/app.js", include_in_schema=False)
 def frontend_js() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "app.js", media_type="text/javascript")
+
+@app.get("/trade-history", include_in_schema=False)
+def trade_history_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "trade-history.html")
+
+@app.get("/order-history.js", include_in_schema=False)
+def order_history_js() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "order-history.js", media_type="text/javascript")
+
+@app.get("/trade-history.js", include_in_schema=False)
+def trade_history_js() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "trade-history.js", media_type="text/javascript")
 
 @app.get("/styles.css", include_in_schema=False)
 def frontend_css() -> FileResponse:

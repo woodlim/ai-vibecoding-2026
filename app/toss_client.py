@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import asyncio
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
 import httpx
 from dotenv import load_dotenv
@@ -24,11 +24,55 @@ class TossClient:
         self.base_url = os.getenv("TOSS_API_BASE_URL", "https://openapi.tossinvest.com").rstrip("/")
         self.client_id = os.getenv("TOSS_CLIENT_ID", "")
         self.client_secret = os.getenv("TOSS_CLIENT_SECRET", "")
+        self.account_seq = os.getenv("TOSS_ACCOUNT_SEQ", "")
         self._token: str | None = None
         self._expires_at = datetime.min.replace(tzinfo=timezone.utc)
         self._stock_cache: list[dict] = []
         self._stock_cache_at = datetime.min.replace(tzinfo=timezone.utc)
         self._token_lock = asyncio.Lock()
+
+    async def domestic_commission(self) -> tuple[Decimal, date | None]:
+        """Read this account's currently applicable KR rate; never place orders."""
+        token = await self._access_token()
+        if not self.account_seq or self.account_seq == "your_account_seq_here":
+            accounts = await self._request("GET", "/api/v1/accounts", headers={"Authorization": f"Bearer {token}"})
+            if accounts.status_code >= 400:
+                raise TossApiError(f"수수료 조회용 계좌 확인 실패: HTTP {accounts.status_code}")
+            try:
+                rows = accounts.json()["result"]
+                if not isinstance(rows, list) or len(rows) != 1 or rows[0].get("accountSeq") is None:
+                    raise ValueError("ambiguous account")
+                self.account_seq = str(rows[0]["accountSeq"])
+            except (KeyError, TypeError, AttributeError, ValueError) as exc:
+                raise TossApiError("수수료 조회용 계좌를 하나로 결정할 수 없습니다. TOSS_ACCOUNT_SEQ를 설정하세요.") from exc
+        response = await self._request(
+            "GET", "/api/v1/commissions",
+            headers={"Authorization": f"Bearer {token}", "X-Tossinvest-Account": self.account_seq},
+        )
+        if response.status_code >= 400:
+            raise TossApiError(f"계좌 수수료 조회 실패: HTTP {response.status_code}")
+        today = datetime.now(timezone(timedelta(hours=9))).date()
+        try:
+            applicable = []
+            rows = response.json()["result"]
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise ValueError("invalid commission rows")
+            for row in rows:
+                if row.get("marketCountry") != "KR":
+                    continue
+                start = date.fromisoformat(row["startDate"]) if row.get("startDate") else None
+                end = date.fromisoformat(row["endDate"]) if row.get("endDate") else None
+                if (start and start > today) or (end and end < today):
+                    continue
+                rate = Decimal(str(row["commissionRate"]))
+                if not rate.is_finite() or not Decimal(0) <= rate <= Decimal(1):
+                    raise ValueError("invalid rate")
+                applicable.append((rate, end))
+            if len(applicable) == 1:
+                return applicable[0]
+        except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+            raise TossApiError("계좌 수수료 응답이 올바르지 않습니다.") from exc
+        raise TossApiError("현재 적용할 국내주식 계좌 수수료를 확인할 수 없습니다.")
 
     async def _request(self, method: str, path: str, *, timeout: float = 10, **kwargs) -> httpx.Response:
         try:

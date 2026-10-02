@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Toss Auto Trader</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=history-buttons-2">
 </head>
 <body>
 <main>
@@ -34,11 +34,13 @@
   </section>
   <article class="trade-history">
     <h2>매매 내역 <button id="refreshButton" type="button" class="secondary">새로고침</button></h2>
-    <p class="subtle">잔고·보유주식 평가액·매매 내역은 30초마다 갱신됩니다. 매도 행에는 평균 매수가 대비 실현손익이 표시됩니다.</p>
+    <p class="subtle">최근 매매 10건을 최신순으로 표시하며 30초마다 갱신됩니다. 정산금액과 실현손익은 매수·매도 수수료를 반영합니다. 매도 세금은 제외됩니다.</p>
     <div id="orders" class="trade-history-table">아직 자동매매 내역이 없습니다.</div>
+    <div class="history-actions"><a class="navigation-button navigation-button--primary" href="/trade-history"><span>매매내역 보기</span><svg class="navigation-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></a></div>
   </article>
   <footer>V0.1 · PAPER 모드 · 토스증권 실거래 API 미연결</footer>
 </main>
+<script src="/order-history.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
